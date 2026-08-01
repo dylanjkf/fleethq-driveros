@@ -25,12 +25,31 @@
  *    notification the backend sent, focus/open the linked page on click.
  */
 
-const CACHE = 'driveros-shell-v1';
+// Two caches with distinct lifetimes so the runtime asset cache can be size-
+// bounded without ever evicting the boot shell:
+//   - SHELL_CACHE: '/', '/index.html' — cached at install, never trimmed, so an
+//     offline reload always has a shell to boot.
+//   - ASSET_CACHE: content-hashed JS/CSS/images/fonts — stale-while-revalidate,
+//     trimmed to MAX_ASSET_ENTRIES. Because production filenames are hashed, a
+//     new release adds entries under new names; without a cap this cache grew
+//     unbounded across releases (old hashes were never evicted — the exact
+//     storage-quota risk the offline outbox is meant to guard against). Trimming
+//     oldest-first (Cache API keys() preserve insertion order) keeps it bounded.
+const SHELL_CACHE = 'driveros-shell-v1';
+const ASSET_CACHE = 'driveros-assets-v1';
+const CURRENT_CACHES = [SHELL_CACHE, ASSET_CACHE];
 const APP_SHELL = '/index.html';
+const MAX_ASSET_ENTRIES = 80;
+
+async function trimCache(cache, maxEntries) {
+  const keys = await cache.keys();
+  if (keys.length <= maxEntries) return;
+  await Promise.all(keys.slice(0, keys.length - maxEntries).map((k) => cache.delete(k)));
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(['/', APP_SHELL])).then(() => self.skipWaiting()),
+    caches.open(SHELL_CACHE).then((cache) => cache.addAll(['/', APP_SHELL])).then(() => self.skipWaiting()),
   );
 });
 
@@ -38,7 +57,7 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => !CURRENT_CACHES.includes(k)).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });
@@ -64,17 +83,38 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Static assets: stale-while-revalidate.
+  // Static assets: stale-while-revalidate, into the size-capped asset cache.
   event.respondWith(
-    caches.open(CACHE).then(async (cache) => {
+    caches.open(ASSET_CACHE).then(async (cache) => {
       const cached = await cache.match(request);
       const network = fetch(request)
         .then((response) => {
-          if (response && response.ok) cache.put(request, response.clone());
+          if (response && response.ok) {
+            // Cache then trim so the asset cache can't grow past MAX_ASSET_ENTRIES
+            // across releases. Fire-and-forget the trim; it must not delay the response.
+            void cache.put(request, response.clone()).then(() => trimCache(cache, MAX_ASSET_ENTRIES));
+          }
           return response;
         })
         .catch(() => undefined);
       return cached || (await network) || fetch(request);
+    }),
+  );
+});
+
+// --- Background Sync ---------------------------------------------------------
+// The app (src/lib/sync-engine.ts) registers a 'driveros-outbox' sync when it
+// queues a mutation offline. The browser fires this event once connectivity
+// returns — including while the app is only backgrounded, not foreground-
+// focused, which the app's own `online`/interval drains can't cover. We wake
+// any client window to run its drainOutbox(); a fully-closed-app drain from the
+// worker itself is a deliberate follow-up (it needs the ordered-replay/dead-
+// letter logic ported in, which is safety-critical and out of scope here).
+self.addEventListener('sync', (event) => {
+  if (event.tag !== 'driveros-outbox') return;
+  event.waitUntil(
+    self.clients.matchAll({ includeUncontrolled: true, type: 'window' }).then((clients) => {
+      for (const client of clients) client.postMessage({ type: 'drain-outbox' });
     }),
   );
 });

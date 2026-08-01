@@ -98,7 +98,13 @@ function isIdempotentReplay(error: unknown, item: { idempotentReplayCodes?: stri
  * dead zone.
  */
 export async function drainOutbox(): Promise<void> {
-  if (draining || !navigator.onLine) return;
+  if (draining) return;
+  if (!navigator.onLine) {
+    // Can't send now — ask the browser to wake us for a background sync when
+    // connectivity returns, so a backgrounded app still flushes on reconnect.
+    void requestBackgroundSync();
+    return;
+  }
   draining = true;
   try {
     const items = await getOutbox();
@@ -156,10 +162,40 @@ export async function discardDeadLettered(id?: string): Promise<void> {
   await notifyListeners();
 }
 
+/**
+ * Ask the browser to fire a `sync` event (handled in public/sw.js) once
+ * connectivity returns, even if the app is only backgrounded rather than
+ * foreground-focused — the `online`/interval drains above only run while the
+ * tab is active. Feature-detected: unsupported on iOS Safari and any
+ * non-secure context, where it's a silent no-op and the foreground drains
+ * remain the mechanism. The SW's `sync` handler messages open clients to run
+ * drainOutbox(); a fully-closed-app drain from the SW itself is a deliberate
+ * follow-up (it would need the ordered-replay/dead-letter logic ported into the
+ * worker, which is safety-critical and out of scope for this change).
+ */
+export async function requestBackgroundSync(): Promise<void> {
+  try {
+    if (!('serviceWorker' in navigator)) return;
+    const reg = await navigator.serviceWorker.ready;
+    const syncManager = (reg as ServiceWorkerRegistration & { sync?: { register(tag: string): Promise<void> } }).sync;
+    await syncManager?.register('driveros-outbox');
+  } catch {
+    // Background Sync unsupported/blocked — the foreground drains still apply.
+  }
+}
+
 export function initSyncEngine(): void {
   window.addEventListener('online', () => void drainOutbox());
   // A periodic sweep so a transient failure that outlasts the `online` event
   // (a server 5xx that later recovers) still drains without user action.
   window.setInterval(() => void drainOutbox(), PERIODIC_RETRY_MS);
+  // The service worker fires a `drain-outbox` message when the browser wakes it
+  // for a background sync (connectivity returned while backgrounded).
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (event: MessageEvent) => {
+      if ((event.data as { type?: string })?.type === 'drain-outbox') void drainOutbox();
+    });
+  }
+  void requestBackgroundSync();
   void drainOutbox();
 }
