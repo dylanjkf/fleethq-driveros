@@ -7,6 +7,7 @@ import {
   checklistDraftKey,
   deleteChecklistDraft,
   getChecklistDraft,
+  OutboxQuotaError,
   saveChecklistDraft,
 } from '@/lib/offline-db';
 import type { ChecklistAnswerStatus, ChecklistTemplate } from '@/api/types';
@@ -112,8 +113,15 @@ export function ChecklistRunner({ template, assetId, assetName, onDone }: Checkl
         startedAt,
         updatedAt: Date.now(),
       });
-    } catch {
-      setError("Couldn't save your progress on this device — your latest answer may not be stored. Check your device storage and re-enter it.");
+    } catch (err) {
+      // Mirror StopPage: a quota failure means this answer was NOT stored — say
+      // so plainly so a low-storage device never silently loses the safety
+      // checklist mid-run.
+      setError(
+        err instanceof OutboxQuotaError
+          ? err.message
+          : "Couldn't save your progress on this device — your latest answer may not be stored. Check your device storage and re-enter it.",
+      );
     }
   }
 

@@ -147,7 +147,17 @@ export function checklistDraftKey(assetId: string, templateId: string): string {
 
 export async function saveChecklistDraft(draft: ChecklistDraftRow): Promise<void> {
   const db = await getDb();
-  await db.put('checklistDrafts', { ...draft, updatedAt: Date.now() });
+  // Mirror queueMutation: a quota-exhausted write must surface as a typed
+  // OutboxQuotaError, never a silent unhandled rejection — otherwise a driver on
+  // a full device keeps answering the safety checklist believing each answer is
+  // saved when it isn't. The caller (ChecklistRunner) turns this into a visible
+  // "your progress wasn't stored" message.
+  try {
+    await db.put('checklistDrafts', { ...draft, updatedAt: Date.now() });
+  } catch (err) {
+    if (isQuotaError(err)) throw new OutboxQuotaError();
+    throw err;
+  }
 }
 
 export async function getChecklistDraft(key: string): Promise<ChecklistDraftRow | undefined> {
