@@ -293,3 +293,24 @@ export async function getCache<T>(key: string): Promise<{ data: T; cachedAt: num
   if (!row) return undefined;
   return { data: row.data as T, cachedAt: row.cachedAt };
 }
+
+/**
+ * Purge locally-cached personal/business data on explicit logout (or a real
+ * 401). DriverOS runs on shared tablets, so a departing driver's cached
+ * identity, jobs (customer addresses), glovebox documents and in-progress
+ * checklist answers must not survive for whoever logs in next.
+ *
+ * Deliberately clears only the re-fetchable `cache` and the local
+ * `checklistDrafts`. The `outbox` and `deadLetter` stores — mutations the driver
+ * captured offline that have NOT yet reached the server (a POD, a "broke down"
+ * message) — are preserved: silently discarding unsynced work on logout would be
+ * its own serious data-loss bug. Call this ONLY on explicit logout / a real 401,
+ * never on a network-0 failure.
+ */
+export async function clearSensitiveData(): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(['cache', 'checklistDrafts'], 'readwrite');
+  await tx.objectStore('cache').clear();
+  await tx.objectStore('checklistDrafts').clear();
+  await tx.done;
+}

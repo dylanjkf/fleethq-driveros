@@ -2,7 +2,7 @@ import { createContext, useCallback, useEffect, useMemo, useState, type ReactNod
 import * as authApi from '@/api/auth';
 import { setUnauthorizedHandler } from '@/api/client';
 import { tokenStore } from '@/api/token-store';
-import { getCache, setCache } from '@/lib/offline-db';
+import { getCache, setCache, clearSensitiveData } from '@/lib/offline-db';
 import type { CurrentUser, LoginResult } from '@/api/types';
 
 const ME_CACHE_KEY = 'me';
@@ -70,6 +70,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
+      // A real 401 (token revoked/expired server-side) is a genuine end of
+      // session — purge cached personal/business data so it can't linger for
+      // the next person on this shared tablet. Fire-and-forget: never block the
+      // logout transition on IndexedDB.
+      void clearSensitiveData().catch(() => undefined);
       setUser(null);
       setStatus('unauthenticated');
     });
@@ -101,6 +106,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     tokenStore.clear();
+    // Explicit logout on a shared tablet: wipe cached identity, jobs (customer
+    // addresses), glovebox docs and in-progress checklist drafts so they don't
+    // survive for the next driver. Unsynced outbox work is deliberately kept
+    // (see clearSensitiveData). Fire-and-forget so logout stays instant.
+    void clearSensitiveData().catch(() => undefined);
     setUser(null);
     setStatus('unauthenticated');
   }, []);
