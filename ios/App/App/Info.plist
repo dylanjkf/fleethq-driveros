@@ -22,6 +22,18 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- Privacy usage descriptions. iOS terminates the app if a capability is
+	     requested without its description key, so these are required before any
+	     native build: DriverOS captures proof-of-delivery / fault photos and
+	     reports the operator's live location to their dispatch office while on shift. -->
+	<key>NSCameraUsageDescription</key>
+	<string>DriverOS uses the camera to capture proof-of-delivery and vehicle fault photos.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>DriverOS attaches photos from your library as proof of delivery or fault evidence.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>DriverOS saves proof-of-delivery photos you capture.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>DriverOS shares your location with your dispatch office only while you are on shift.</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

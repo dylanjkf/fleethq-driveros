@@ -65,3 +65,30 @@ done from a Linux CI/sandbox environment:
 
 See `fleethq-platform`'s `FleetOS-Playbook/04-DriverOS/App_Packaging.md` for
 the full packaging and store-submission checklist.
+
+## Release versioning
+
+`package.json` `version` is the single source of truth for the marketing
+version (currently `1.0.0`). Each store release must set the native
+marketing/build numbers from it, and the build number must increase
+monotonically or the store rejects the upload:
+
+| Platform | Marketing version | Build number (must increment every upload) |
+|----------|-------------------|--------------------------------------------|
+| Android  | `versionName` in `android/app/build.gradle` = `package.json` version | `versionCode` = previous + 1 |
+| iOS      | `MARKETING_VERSION` in the Xcode project = `package.json` version | `CURRENT_PROJECT_VERSION` = previous + 1 |
+
+Process for a release: bump `package.json` `version` (semver), set
+`versionName` / `MARKETING_VERSION` to match, bump `versionCode` /
+`CURRENT_PROJECT_VERSION` to one above the last uploaded build, then
+`npm run app:sync` and archive. The placeholders shipped in the repo
+(`versionCode 1` / `versionName "1.0"` / `MARKETING_VERSION 1.0`) are the
+first-release starting point.
+
+## Orientation
+
+The PWA no longer force-locks portrait (`manifest.webmanifest`
+`"orientation": "any"`) so a tablet mounted in a cab can run landscape. The
+page shells are single-column flex layouts that reflow acceptably in
+landscape; a tablet-optimised multi-column layout for the wider breakpoints
+is a tracked follow-up, not a blocker for landscape use.

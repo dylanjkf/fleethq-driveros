@@ -7,6 +7,7 @@ import {
   checklistDraftKey,
   deleteChecklistDraft,
   getChecklistDraft,
+  OutboxQuotaError,
   saveChecklistDraft,
 } from '@/lib/offline-db';
 import type { ChecklistAnswerStatus, ChecklistTemplate } from '@/api/types';
@@ -94,19 +95,34 @@ export function ChecklistRunner({ template, assetId, assetName, onDone }: Checkl
   );
 
   async function persist(next: Record<string, AnswerState>) {
-    await saveChecklistDraft({
-      key: draftKey,
-      submissionId,
-      assetId,
-      assetName,
-      templateId: template.id,
-      templateVersion: template.version,
-      templateName: template.name,
-      items: template.items,
-      answers: next,
-      startedAt,
-      updatedAt: Date.now(),
-    });
+    // Autosave the draft to IndexedDB. This is the "never lose a captured
+    // answer" guarantee, so a write failure must be surfaced, not swallowed —
+    // otherwise the operator keeps answering believing their progress is saved
+    // when it isn't (a full device or a private-mode storage block).
+    try {
+      await saveChecklistDraft({
+        key: draftKey,
+        submissionId,
+        assetId,
+        assetName,
+        templateId: template.id,
+        templateVersion: template.version,
+        templateName: template.name,
+        items: template.items,
+        answers: next,
+        startedAt,
+        updatedAt: Date.now(),
+      });
+    } catch (err) {
+      // Mirror StopPage: a quota failure means this answer was NOT stored — say
+      // so plainly so a low-storage device never silently loses the safety
+      // checklist mid-run.
+      setError(
+        err instanceof OutboxQuotaError
+          ? err.message
+          : "Couldn't save your progress on this device — your latest answer may not be stored. Check your device storage and re-enter it.",
+      );
+    }
   }
 
   function setStatus(itemId: string, status: ChecklistAnswerStatus) {
