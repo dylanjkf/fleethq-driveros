@@ -103,9 +103,14 @@ describe('offline-db clearSensitiveData', () => {
     await offlineDb.saveChecklistDraft({
       key: 'asset-1',
       assetId: 'asset-1',
+      assetName: 'Truck 1',
       templateId: 'tpl-1',
+      templateVersion: 1,
+      templateName: 'Pre-start',
+      items: [],
       submissionId: 'sub-1',
       answers: { tyres: { status: 'pass' } },
+      startedAt: new Date(0).toISOString(),
       updatedAt: Date.now(),
     });
     await offlineDb.queueMutation({ method: 'POST', url: '/v1/a', body: { n: 1 } });
