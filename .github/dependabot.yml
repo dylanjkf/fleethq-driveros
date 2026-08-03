@@ -18,3 +18,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+
+  # Capacitor Android native project (Gradle). The iOS project uses Swift
+  # Package Manager (ios/App/CapApp-SPM), which Dependabot does not support, so
+  # those native dependencies are bumped by re-syncing Capacitor from npm.
+  - package-ecosystem: gradle
+    directory: /android
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      gradle-minor-and-patch:
+        update-types:
+          - minor
+          - patch
