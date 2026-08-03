@@ -43,8 +43,8 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
-let onUnauthorized: (() => void) | null = null;
-export function setUnauthorizedHandler(handler: () => void): void {
+let onUnauthorized: (() => void | Promise<void>) | null = null;
+export function setUnauthorizedHandler(handler: () => void | Promise<void>): void {
   onUnauthorized = handler;
 }
 
@@ -72,7 +72,9 @@ async function confirmAndHandleUnauthorized(): Promise<void> {
     const res = await fetch(`${base}/v1/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
     if (res.status === 401) {
       tokenStore.clear();
-      onUnauthorized?.();
+      // Await the session-data purge so IndexedDB + push teardown is guaranteed
+      // to finish before anything reacts to the now-unauthenticated state.
+      await onUnauthorized?.();
     }
     // Any other outcome (200, 5xx, …) means the session is still valid; leave it.
   } catch {

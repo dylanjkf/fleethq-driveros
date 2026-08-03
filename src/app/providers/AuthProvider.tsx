@@ -88,13 +88,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    setUnauthorizedHandler(() => {
+    setUnauthorizedHandler(async () => {
       // A confirmed dead session (see api/client.ts — a 401 re-validated against
       // /me) is a genuine end of session. Clear the in-memory query cache
-      // synchronously so no screen can paint the old driver's data, then purge
-      // IndexedDB + push in the background.
+      // synchronously so no screen can paint the old driver's data, then AWAIT the
+      // IndexedDB + push purge (client.ts awaits this handler) so it is guaranteed
+      // to complete rather than being fire-and-forgotten.
       queryClient.clear();
-      void purgeSessionData();
+      await purgeSessionData();
       setUser(null);
       setStatus('unauthenticated');
     });
@@ -125,15 +126,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
+    // Explicit logout on a shared tablet. Order matters:
+    //  1. Tear down the push subscription FIRST, while the access token is still
+    //     valid — the server-side unsubscribe (POST /v1/push/unsubscribe) needs
+    //     auth, so clearing the token first (the previous order) left the
+    //     subscription live server-side and the next driver's device could keep
+    //     receiving this driver's notifications.
+    //  2. THEN clear the token, so no further authenticated refetch can run.
+    //  3. THEN wipe the local caches (in-memory query cache + IndexedDB), AWAITED
+    //     so nothing survives before the login screen renders. Unsynced outbox
+    //     work is deliberately kept (see clearSensitiveData).
+    await disablePushNotifications().catch(() => undefined);
     tokenStore.clear();
-    // Explicit logout on a shared tablet: clear the in-memory query cache
-    // immediately, then AWAIT the IndexedDB + push purge so nothing survives for
-    // the next driver before the login screen renders. Unsynced outbox work is
-    // deliberately kept (see clearSensitiveData).
-    await purgeSessionData();
+    queryClient.clear();
+    await clearSensitiveData().catch(() => undefined);
     setUser(null);
     setStatus('unauthenticated');
-  }, [purgeSessionData]);
+  }, [queryClient]);
 
   const value = useMemo<AuthContextValue>(
     () => ({ status, user, isOffline, login, selectCompany, logout }),
