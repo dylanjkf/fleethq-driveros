@@ -1,8 +1,10 @@
 import { createContext, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import * as authApi from '@/api/auth';
 import { setUnauthorizedHandler } from '@/api/client';
 import { tokenStore } from '@/api/token-store';
 import { getCache, setCache, clearSensitiveData } from '@/lib/offline-db';
+import { disablePushNotifications } from '@/lib/push-registration';
 import type { CurrentUser, LoginResult } from '@/api/types';
 
 const ME_CACHE_KEY = 'me';
@@ -25,6 +27,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
+  const queryClient = useQueryClient();
+
+  /**
+   * Purge everything the departed driver leaves behind on a shared tablet — the
+   * three layers the earlier IndexedDB-only wipe missed (Round 3 High/Low):
+   *   - the in-memory React Query cache (what several screens paint from on first
+   *     render), via queryClient.clear();
+   *   - the IndexedDB caches, via clearSensitiveData() — now AWAITED so it's
+   *     guaranteed to finish before the next login screen can render;
+   *   - the OS push subscription, so notifications for the old driver stop.
+   * Unsynced outbox work is deliberately preserved (see clearSensitiveData).
+   */
+  const purgeSessionData = useCallback(async () => {
+    queryClient.clear();
+    await clearSensitiveData().catch(() => undefined);
+    await disablePushNotifications().catch(() => undefined);
+  }, [queryClient]);
 
   const loadCurrentUser = useCallback(async () => {
     try {
@@ -70,15 +89,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
-      // A real 401 (token revoked/expired server-side) is a genuine end of
-      // session — purge cached personal/business data so it can't linger for
-      // the next person on this shared tablet. Fire-and-forget: never block the
-      // logout transition on IndexedDB.
-      void clearSensitiveData().catch(() => undefined);
+      // A confirmed dead session (see api/client.ts — a 401 re-validated against
+      // /me) is a genuine end of session. Clear the in-memory query cache
+      // synchronously so no screen can paint the old driver's data, then purge
+      // IndexedDB + push in the background.
+      queryClient.clear();
+      void purgeSessionData();
       setUser(null);
       setStatus('unauthenticated');
     });
-  }, []);
+  }, [queryClient, purgeSessionData]);
 
   const login = useCallback(
     async (username: string, password: string) => {
@@ -104,16 +124,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [loadCurrentUser],
   );
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
     tokenStore.clear();
-    // Explicit logout on a shared tablet: wipe cached identity, jobs (customer
-    // addresses), glovebox docs and in-progress checklist drafts so they don't
-    // survive for the next driver. Unsynced outbox work is deliberately kept
-    // (see clearSensitiveData). Fire-and-forget so logout stays instant.
-    void clearSensitiveData().catch(() => undefined);
+    // Explicit logout on a shared tablet: clear the in-memory query cache
+    // immediately, then AWAIT the IndexedDB + push purge so nothing survives for
+    // the next driver before the login screen renders. Unsynced outbox work is
+    // deliberately kept (see clearSensitiveData).
+    await purgeSessionData();
     setUser(null);
     setStatus('unauthenticated');
-  }, []);
+  }, [purgeSessionData]);
 
   const value = useMemo<AuthContextValue>(
     () => ({ status, user, isOffline, login, selectCompany, logout }),
