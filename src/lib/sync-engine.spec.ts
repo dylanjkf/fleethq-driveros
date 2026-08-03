@@ -145,6 +145,29 @@ describe('drainOutbox', () => {
     expect(await offlineDb.getDeadLetter()).toHaveLength(1); // not a declared idempotent code → dead-lettered
   });
 
+  it('pauses (does not mass-dead-letter) on a 401 mid-drain — a token expiring with a queued batch preserves the whole queue', async () => {
+    // Item a sends; item b hits a 401 (token expired). Every item AFTER b would
+    // also 401 with the now-cleared token, so a 401 must NOT dead-letter b and
+    // continue — it must stop and preserve b + everything behind it for auto-sync
+    // after re-auth. Regression test for the shared-tablet mass-dead-letter bug.
+    requestMock
+      .mockResolvedValueOnce({}) // a succeeds
+      .mockRejectedValueOnce(Object.assign(new Error('Unauthorized'), { status: 401 })); // b: session ended
+
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/a', body: { n: 1 } });
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/b', body: { n: 2 } });
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/c', body: { n: 3 } });
+
+    await syncEngine.drainOutbox();
+
+    // Stopped at b — c was never attempted this pass.
+    expect(requestMock).toHaveBeenCalledTimes(2);
+    // b and c are still queued (nothing lost), and NOTHING was dead-lettered.
+    const remaining = await offlineDb.getOutbox();
+    expect(remaining.map((i) => (i.body as { n: number }).n)).toEqual([2, 3]);
+    expect(await offlineDb.getDeadLetter()).toEqual([]);
+  });
+
   it('retryDeadLettered re-queues failed items and drains them once the cause is resolved', async () => {
     requestMock.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }));
     await offlineDb.queueMutation({ method: 'POST', url: '/v1/a', body: { n: 1 } });

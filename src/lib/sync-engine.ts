@@ -65,6 +65,19 @@ function isRetryable(error: unknown): boolean {
   return true;
 }
 
+/**
+ * A 401 is not a per-item verdict — it means the whole session just ended. It
+ * must NOT be treated like other permanent 4xx: dead-lettering the 401'd item
+ * and continuing would fire every *subsequent* queued item with no auth header
+ * (the api client's 401 handler has already cleared the token), so each would
+ * also 401 and also be dead-lettered — the entire batch demoted to "needs
+ * manual retry" for the next driver. Instead we pause the drain and leave the
+ * queue intact, so it auto-syncs once someone re-authenticates.
+ */
+function isAuthFailure(error: unknown): boolean {
+  return (error as { status?: number } | null)?.status === 401;
+}
+
 function describeError(error: unknown): string {
   const status = (error as { status?: number } | null)?.status;
   const message = (error as { message?: string } | null)?.message ?? String(error);
@@ -118,6 +131,12 @@ export async function drainOutbox(): Promise<void> {
           // lost — treat this "conflict" as the success it really is.
           await removeFromOutbox(item.id);
           continue;
+        }
+        if (isAuthFailure(error)) {
+          // Session ended mid-drain: preserve the whole remaining queue and stop.
+          // (See isAuthFailure — never mass-dead-letter a batch on one 401.)
+          await markOutboxAttempt(item.id, (item.attempts ?? 0) + 1, describeError(error));
+          break;
         }
         if (isRetryable(error)) {
           // Keep FIFO: record the attempt and stop; the rest stays queued.

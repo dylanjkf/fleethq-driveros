@@ -94,3 +94,38 @@ describe('offline-db checklist drafts', () => {
     expect(await offlineDb.getChecklistDraft(draft.key)).toBeUndefined();
   });
 });
+
+describe('offline-db clearSensitiveData', () => {
+  it('clears the cache and checklist drafts but PRESERVES the outbox and dead-letter (unsynced work is never lost)', async () => {
+    // Seed all four stores: two "sensitive" (a departed driver's cached data)
+    // and two that hold unsynced mutations that MUST survive a logout wipe.
+    await offlineDb.setCache('me', { fullName: 'Driver A' });
+    await offlineDb.saveChecklistDraft({
+      key: 'asset-1',
+      assetId: 'asset-1',
+      assetName: 'Truck 1',
+      templateId: 'tpl-1',
+      templateVersion: 1,
+      templateName: 'Pre-start',
+      items: [],
+      submissionId: 'sub-1',
+      answers: { tyres: { status: 'pass' } },
+      startedAt: new Date(0).toISOString(),
+      updatedAt: Date.now(),
+    });
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/a', body: { n: 1 } });
+    // Move one item to the dead-letter store.
+    const [queued] = await offlineDb.getOutbox();
+    await offlineDb.moveToDeadLetter(queued, '400: bad request');
+
+    await offlineDb.clearSensitiveData();
+
+    // Sensitive stores wiped...
+    expect(await offlineDb.getCache('me')).toBeUndefined();
+    expect(await offlineDb.getChecklistDraft('asset-1')).toBeUndefined();
+    // ...but unsynced work is untouched.
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/b', body: { n: 2 } });
+    expect((await offlineDb.getOutbox()).map((i) => (i.body as { n: number }).n)).toEqual([2]);
+    expect(await offlineDb.getDeadLetter()).toHaveLength(1);
+  });
+});

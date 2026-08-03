@@ -48,6 +48,40 @@ export function setUnauthorizedHandler(handler: () => void): void {
   onUnauthorized = handler;
 }
 
+let confirmingSession = false;
+
+/**
+ * Confirm the session is genuinely dead before ending it (Round 3 Medium). A 401
+ * on any single endpoint — including a bug on a background-polled one
+ * (notifications every 20s, fatigue every 5 min) — must NOT by itself log the
+ * driver out and wipe the tablet mid-shift. So on a 401 we re-validate the token
+ * against `/v1/auth/me` with a bare fetch (no interceptor, no recursion):
+ *   - `/me` also 401s  → the token really is dead → clear + fire the handler.
+ *   - `/me` succeeds   → the original 401 was endpoint-specific → keep the session.
+ *   - network failure  → inconclusive → keep the session (offline-first: never
+ *                        wipe on uncertainty).
+ * Guarded so overlapping 401s trigger only one confirmation.
+ */
+async function confirmAndHandleUnauthorized(): Promise<void> {
+  if (confirmingSession) return;
+  const token = tokenStore.get();
+  if (!token) return; // already signed out
+  confirmingSession = true;
+  try {
+    const base = import.meta.env.VITE_API_BASE || '';
+    const res = await fetch(`${base}/v1/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 401) {
+      tokenStore.clear();
+      onUnauthorized?.();
+    }
+    // Any other outcome (200, 5xx, …) means the session is still valid; leave it.
+  } catch {
+    // Network failure while confirming — inconclusive; do not end the session.
+  } finally {
+    confirmingSession = false;
+  }
+}
+
 apiClient.interceptors.response.use(
   (response) => response,
   (error: AxiosError<ApiErrorBody>) => {
@@ -56,10 +90,10 @@ apiClient.interceptors.response.use(
 
     // Only a real 401 clears the session — a network failure (status 0,
     // e.g. offline) must never look like an invalid login, per DriverOS's
-    // "offline-first, always" non-negotiable (CLAUDE.md).
+    // "offline-first, always" non-negotiable (CLAUDE.md). And even a 401 is
+    // confirmed against /me first, so one endpoint's 401 can't end a shift.
     if (status === 401) {
-      tokenStore.clear();
-      onUnauthorized?.();
+      void confirmAndHandleUnauthorized();
     }
 
     const { code = 'NETWORK_ERROR', message = error.message, ...details } = body ?? {};
