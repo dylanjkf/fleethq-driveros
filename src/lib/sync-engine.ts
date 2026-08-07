@@ -38,7 +38,7 @@ let draining = false;
 const PERIODIC_RETRY_MS = 30_000;
 
 async function currentState(): Promise<OutboxState> {
-  const [ownership, failed] = await Promise.all([countOutboxOwnership(currentOwnerId()), countDeadLetter()]);
+  const [ownership, failed] = await Promise.all([countOutboxOwnership(currentOwnerId()), countDeadLetter(currentOwnerId())]);
   return { pending: ownership.own, failed, foreign: ownership.foreign };
 }
 
@@ -173,9 +173,11 @@ export async function drainOutbox(): Promise<void> {
 }
 
 /** Move every dead-lettered item back onto the queue and try again — the
- *  driver's self-rescue path once the underlying cause is fixed. */
+ *  driver's self-rescue path once the underlying cause is fixed. Scoped to the
+ *  signed-in driver so it never requeues a previous driver's stranded work
+ *  (which would only be skipped by the owner-filtered drain anyway). */
 export async function retryDeadLettered(): Promise<void> {
-  const failed = await getDeadLetter();
+  const failed = await getDeadLetter(currentOwnerId());
   for (const item of failed) await requeueDeadLetter(item.id);
   await notifyListeners();
   await drainOutbox();
@@ -188,13 +190,15 @@ export async function retryDeadLettered(): Promise<void> {
  * Retrying those just re-fails them forever, so the driver needs a way to clear
  * them and get the red banner off their screen. Without this the failed count
  * could only ever grow. Passing no id discards them all (the banner's bulk
- * action); passing one discards just that item.
+ * action) — scoped to the signed-in driver so "discard all" can never wipe a
+ * previous driver's stranded POD/message off a shared tablet; passing one
+ * discards just that item (its id comes from the owner-scoped banner list).
  */
 export async function discardDeadLettered(id?: string): Promise<void> {
   if (id) {
     await discardDeadLetter(id);
   } else {
-    const failed = await getDeadLetter();
+    const failed = await getDeadLetter(currentOwnerId());
     for (const item of failed) await discardDeadLetter(item.id);
   }
   await notifyListeners();

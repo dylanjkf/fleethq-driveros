@@ -302,15 +302,28 @@ export async function moveToDeadLetter(item: OutboxItem, lastError: string): Pro
   await tx.done;
 }
 
-export async function getDeadLetter(): Promise<DeadLetterItem[]> {
+/**
+ * Dead-lettered items, oldest first. On a shared tablet the dead-letter store
+ * survives logout, so it can hold the *previous* driver's permanently-failed
+ * mutations (their POD, their fault report). Passing `activeOwner` scopes the
+ * result to that driver so one driver never sees, retries, or discards another
+ * driver's failed work; omit it only for maintenance paths that genuinely need
+ * the whole store. `null` (nobody signed in) matches nothing. Security audit H4.
+ */
+export async function getDeadLetter(activeOwner?: string | null): Promise<DeadLetterItem[]> {
   const db = await getDb();
   const items = await db.getAll('deadLetter');
-  return items.sort((a, b) => a.createdAt - b.createdAt);
+  const scoped = activeOwner === undefined ? items : items.filter((i) => i.owner === activeOwner);
+  return scoped.sort((a, b) => a.createdAt - b.createdAt);
 }
 
-export async function countDeadLetter(): Promise<number> {
-  const db = await getDb();
-  return db.count('deadLetter');
+/** Count of dead-lettered items, scoped to `activeOwner` when provided (see getDeadLetter). */
+export async function countDeadLetter(activeOwner?: string | null): Promise<number> {
+  if (activeOwner === undefined) {
+    const db = await getDb();
+    return db.count('deadLetter');
+  }
+  return (await getDeadLetter(activeOwner)).length;
 }
 
 /** Put a dead-lettered item back on the queue (reset attempts) so a driver can

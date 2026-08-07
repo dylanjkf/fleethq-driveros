@@ -3,6 +3,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useOutbox } from '@/hooks/useOutbox';
 import { discardDeadLettered, retryDeadLettered } from '@/lib/sync-engine';
 import { getDeadLetter, type DeadLetterItem } from '@/lib/offline-db';
+import { currentOwnerId } from '@/lib/session-identity';
 
 /** A queued mutation's URL made human — "Delivery", "Fuel entry", etc. — so the
  *  driver can tell what actually failed rather than reading an API path. */
@@ -42,13 +43,15 @@ export function StatusBar() {
   async function toggleDetails() {
     const next = !expanded;
     setExpanded(next);
-    if (next) setItems(await getDeadLetter());
+    // Only ever show the signed-in driver's own failed work — never a previous
+    // driver's stranded mutations on a shared tablet (security audit H4).
+    if (next) setItems(await getDeadLetter(currentOwnerId()));
   }
 
   async function handleDiscard(id?: string) {
     await discardDeadLettered(id);
     // Keep the open list in sync with what's left.
-    setItems(await getDeadLetter());
+    setItems(await getDeadLetter(currentOwnerId()));
   }
 
   return (
