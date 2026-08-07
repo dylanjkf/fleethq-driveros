@@ -1,7 +1,7 @@
 import { apiClient } from '@/api/client';
 import {
   countDeadLetter,
-  countOutbox,
+  countOutboxOwnership,
   discardDeadLetter,
   getDeadLetter,
   getOutbox,
@@ -10,11 +10,21 @@ import {
   removeFromOutbox,
   requeueDeadLetter,
 } from './offline-db';
+import { currentOwnerId } from './session-identity';
 
-/** Outbox state pushed to subscribers: still-pending items and permanently-failed ones. */
+/**
+ * Outbox state pushed to subscribers.
+ *  - `pending`: items the CURRENT driver captured that are waiting to sync.
+ *  - `failed`: dead-lettered items (permanent client errors).
+ *  - `foreign`: items captured by a DIFFERENT driver that are stranded on this
+ *    shared device — the sync engine refuses to replay them under the current
+ *    session (security audit H2), so the UI surfaces them and prompts that
+ *    driver to sign in and sync their own work.
+ */
 export interface OutboxState {
   pending: number;
   failed: number;
+  foreign: number;
 }
 
 type Listener = (state: OutboxState) => void;
@@ -28,8 +38,8 @@ let draining = false;
 const PERIODIC_RETRY_MS = 30_000;
 
 async function currentState(): Promise<OutboxState> {
-  const [pending, failed] = await Promise.all([countOutbox(), countDeadLetter()]);
-  return { pending, failed };
+  const [ownership, failed] = await Promise.all([countOutboxOwnership(currentOwnerId()), countDeadLetter()]);
+  return { pending: ownership.own, failed, foreign: ownership.foreign };
 }
 
 async function notifyListeners(): Promise<void> {
@@ -120,8 +130,17 @@ export async function drainOutbox(): Promise<void> {
   }
   draining = true;
   try {
+    // Only ever replay work captured under the identity that is signed in right
+    // now. On a shared tablet the outbox survives logout, so items another
+    // driver captured are still here — they must NOT be sent under the current
+    // session (they'd be misattributed) and must NOT be dropped (that driver's
+    // POD/message would be lost). They're skipped here and surfaced via the
+    // `foreign` count so that driver can sign in and sync their own work.
+    // Security audit H2.
+    const activeOwner = currentOwnerId();
     const items = await getOutbox();
     for (const item of items) {
+      if (!activeOwner || item.owner !== activeOwner) continue;
       try {
         await apiClient.request({ method: item.method, url: item.url, data: item.body });
         await removeFromOutbox(item.id);

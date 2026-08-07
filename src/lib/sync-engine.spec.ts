@@ -6,6 +6,35 @@ import type * as SyncEngine from './sync-engine';
 const requestMock = vi.fn();
 vi.mock('@/api/client', () => ({ apiClient: { request: (...args: unknown[]) => requestMock(...args) } }));
 
+// A controllable current-driver token so ownership tagging (security audit H2)
+// can be exercised: queueMutation tags items with the signed-in driver, and
+// drainOutbox only replays the current driver's own items.
+const tokenState = vi.hoisted(() => ({ current: null as string | null }));
+vi.mock('@/api/token-store', () => ({
+  tokenStore: {
+    get: () => tokenState.current,
+    set: (t: string) => {
+      tokenState.current = t;
+    },
+    clear: () => {
+      tokenState.current = null;
+    },
+    subscribe: () => () => {},
+  },
+}));
+
+/** Build a JWT-shaped token whose `sub` claim is `driverId` (only the payload matters). */
+function tokenFor(driverId: string): string {
+  const payload = btoa(JSON.stringify({ sub: driverId })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `header.${payload}.signature`;
+}
+function signInAs(driverId: string): void {
+  tokenState.current = tokenFor(driverId);
+}
+function signOut(): void {
+  tokenState.current = null;
+}
+
 let offlineDb: typeof OfflineDb;
 let syncEngine: typeof SyncEngine;
 
@@ -13,6 +42,9 @@ beforeEach(async () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (globalThis as any).indexedDB = new IDBFactory();
   requestMock.mockReset();
+  // Default: a driver is signed in, so the existing single-driver tests queue
+  // and drain under one consistent identity.
+  signInAs('driver-default');
   vi.resetModules();
   offlineDb = await import('./offline-db');
   syncEngine = await import('./sync-engine');
@@ -183,5 +215,90 @@ describe('drainOutbox', () => {
     expect(requestMock).toHaveBeenCalledTimes(1);
     expect(await offlineDb.getDeadLetter()).toEqual([]);
     expect(await offlineDb.getOutbox()).toEqual([]);
+  });
+});
+
+describe('drainOutbox — cross-driver ownership (security audit H2)', () => {
+  /** Capture the latest OutboxState the sync engine publishes. */
+  function trackState(): { last: SyncEngine.OutboxState | null } {
+    const ref: { last: SyncEngine.OutboxState | null } = { last: null };
+    syncEngine.subscribeOutbox((s) => {
+      ref.last = s;
+    });
+    return ref;
+  }
+
+  it('never replays a different driver’s captured work under the current session, and never drops it', async () => {
+    requestMock.mockResolvedValue({});
+
+    // Driver A captures a delivery offline on a shared tablet.
+    signInAs('driver-a');
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/jobs/pod', body: { pod: 'A signature' } });
+
+    // A logs out (outbox is deliberately preserved) and driver B logs in.
+    signOut();
+    signInAs('driver-b');
+    const state = trackState();
+
+    await syncEngine.drainOutbox();
+
+    // A's item was NOT sent under B's session...
+    expect(requestMock).not.toHaveBeenCalled();
+    // ...and was NOT silently dropped — it's still in the outbox...
+    const remaining = await offlineDb.getOutbox();
+    expect(remaining).toHaveLength(1);
+    expect((remaining[0].body as { pod: string }).pod).toBe('A signature');
+    // ...and is surfaced in an explicit "belongs to another driver" state.
+    expect(state.last).toMatchObject({ pending: 0, foreign: 1 });
+  });
+
+  it('drains driver B’s own items while holding driver A’s in the same queue', async () => {
+    requestMock.mockResolvedValue({});
+    signInAs('driver-a');
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/jobs/pod', body: { who: 'a' } });
+    signInAs('driver-b');
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/messages', body: { who: 'b' } });
+
+    await syncEngine.drainOutbox();
+
+    // Only B's item was sent; A's is untouched and still queued.
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(requestMock.mock.calls[0][0]).toMatchObject({ data: { who: 'b' } });
+    const remaining = await offlineDb.getOutbox();
+    expect(remaining.map((i) => (i.body as { who: string }).who)).toEqual(['a']);
+  });
+
+  it('lets the original driver sync their own held work once they sign back in', async () => {
+    requestMock.mockResolvedValue({});
+    signInAs('driver-a');
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/jobs/pod', body: { who: 'a' } });
+
+    // B logs in and drains — A's item is held, not sent.
+    signInAs('driver-b');
+    await syncEngine.drainOutbox();
+    expect(requestMock).not.toHaveBeenCalled();
+    expect(await offlineDb.getOutbox()).toHaveLength(1);
+
+    // A signs back in and drains — now it syncs.
+    signInAs('driver-a');
+    await syncEngine.drainOutbox();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(await offlineDb.getOutbox()).toEqual([]);
+  });
+
+  it('holds (does not replay) items whose owner is unknown — e.g. pre-tagging items backfilled by the migration', async () => {
+    requestMock.mockResolvedValue({});
+    // Simulate a legacy item captured before ownership tagging: queued with no
+    // token → owner UNKNOWN_OWNER (the same value the v4→v5 migration backfills).
+    signOut();
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/jobs/pod', body: { legacy: true } });
+
+    signInAs('driver-b');
+    const state = trackState();
+    await syncEngine.drainOutbox();
+
+    expect(requestMock).not.toHaveBeenCalled();
+    expect(await offlineDb.getOutbox()).toHaveLength(1); // held, not lost
+    expect(state.last).toMatchObject({ foreign: 1 });
   });
 });

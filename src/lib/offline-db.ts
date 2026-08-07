@@ -1,4 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import { currentOwnerId, UNKNOWN_OWNER } from './session-identity';
 
 /**
  * Offline-sync engine (04-DriverOS/DriverOS_Overview.md's "offline-first,
@@ -24,6 +25,14 @@ interface OutboxItem {
   url: string;
   body: unknown;
   createdAt: number;
+  /**
+   * The identity (user id / JWT `sub`) that captured this mutation. On shared
+   * tablets the outbox survives logout, so an item must only ever be replayed
+   * under the same identity that made it — never silently attributed to the next
+   * driver who signs in (security audit H2). Backfilled to UNKNOWN_OWNER for
+   * items queued before this field existed (IndexedDB v4→v5).
+   */
+  owner: string;
   /** Replay attempts so far — for backoff visibility and a "stuck?" signal. */
   attempts?: number;
   /** Human-readable reason the last replay attempt failed (for diagnostics). */
@@ -82,8 +91,9 @@ export interface ChecklistDraftRow {
 interface DriverOSDB extends DBSchema {
   // `byCreatedAt` lets queueMutation find the current max ordering key with a
   // key-cursor, instead of loading every queued body (including base64 photos)
-  // into memory just to compute it — see queueMutation.
-  outbox: { key: string; value: OutboxItem; indexes: { byCreatedAt: number } };
+  // into memory just to compute it — see queueMutation. `byOwner` lets the sync
+  // engine count another driver's held items without deserialising bodies.
+  outbox: { key: string; value: OutboxItem; indexes: { byCreatedAt: number; byOwner: string } };
   cache: { key: string; value: CacheRow };
   checklistDrafts: { key: string; value: ChecklistDraftRow };
   deadLetter: { key: string; value: DeadLetterItem };
@@ -93,8 +103,8 @@ let dbPromise: Promise<IDBPDatabase<DriverOSDB>> | null = null;
 
 function getDb(): Promise<IDBPDatabase<DriverOSDB>> {
   if (!dbPromise) {
-    dbPromise = openDB<DriverOSDB>('driveros', 4, {
-      upgrade(db, oldVersion, _newVersion, tx) {
+    dbPromise = openDB<DriverOSDB>('driveros', 5, {
+      async upgrade(db, oldVersion, _newVersion, tx) {
         if (oldVersion < 1) {
           db.createObjectStore('outbox', { keyPath: 'id' });
           db.createObjectStore('cache', { keyPath: 'key' });
@@ -107,6 +117,23 @@ function getDb(): Promise<IDBPDatabase<DriverOSDB>> {
         }
         if (oldVersion < 4) {
           tx.objectStore('outbox').createIndex('byCreatedAt', 'createdAt');
+        }
+        if (oldVersion < 5) {
+          // Ownership tagging (security audit H2). Backfill every EXISTING
+          // unsynced item to UNKNOWN_OWNER — we can't retroactively know which
+          // driver captured it, so it must be held (never silently replayed
+          // under the next driver), not lost. Then index outbox by owner so the
+          // sync engine can cheaply count another driver's held items.
+          for (const store of ['outbox', 'deadLetter'] as const) {
+            const os = tx.objectStore(store);
+            let cursor = await os.openCursor();
+            while (cursor) {
+              const value = cursor.value as { owner?: string };
+              if (value.owner === undefined) await cursor.update({ ...value, owner: UNKNOWN_OWNER });
+              cursor = await cursor.continue();
+            }
+          }
+          tx.objectStore('outbox').createIndex('byOwner', 'owner');
         }
       },
       // An open blocked by another still-open connection at an older version
@@ -206,8 +233,12 @@ export async function queueMutation(
   const newestKey = await tx.store.index('byCreatedAt').openKeyCursor(null, 'prev');
   const maxCreatedAt = newestKey ? Number(newestKey.key) : 0;
   const createdAt = Math.max(Date.now(), maxCreatedAt + 1);
+  // Tag the capturing identity so this item is only ever replayed under the
+  // same driver (security audit H2). A capture made with no active token (should
+  // not happen on a normal capture path) is tagged UNKNOWN_OWNER and held.
+  const owner = currentOwnerId() ?? UNKNOWN_OWNER;
   try {
-    await tx.store.put({ ...item, id: crypto.randomUUID(), createdAt, attempts: 0 });
+    await tx.store.put({ ...item, id: crypto.randomUUID(), createdAt, attempts: 0, owner });
     await tx.done;
   } catch (err) {
     if (isQuotaError(err)) throw new OutboxQuotaError();
@@ -226,6 +257,21 @@ export async function getOutbox(): Promise<OutboxItem[]> {
 export async function countOutbox(): Promise<number> {
   const db = await getDb();
   return db.count('outbox');
+}
+
+/**
+ * Split the pending outbox into "owned by `activeOwner`" and "belongs to another
+ * driver" without deserialising bodies (uses the byOwner index counts). A null
+ * activeOwner (logged out) means nothing is owned — everything queued belongs to
+ * some previous driver. Used by the sync engine to (a) know how many items it
+ * may replay and (b) surface a "another driver's unsynced work is on this
+ * device" state instead of silently replaying or dropping it (security audit H2).
+ */
+export async function countOutboxOwnership(activeOwner: string | null): Promise<{ own: number; foreign: number }> {
+  const db = await getDb();
+  const total = await db.count('outbox');
+  const own = activeOwner ? await db.countFromIndex('outbox', 'byOwner', activeOwner) : 0;
+  return { own, foreign: total - own };
 }
 
 export async function removeFromOutbox(id: string): Promise<void> {
