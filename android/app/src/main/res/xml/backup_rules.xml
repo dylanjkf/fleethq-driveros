@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Security audit M3 — pre-Android-12 counterpart to data_extraction_rules.xml.
+  Excludes everything from Auto Backup so the WebView's offline captures (POD
+  photos, signatures, addresses, checklists) and the stored access token can't
+  be backed up in a way that bypasses the app's logout wipe. (allowBackup=false
+  already disables Auto Backup; this makes the intent explicit and stays correct
+  if backup is ever re-enabled.)
+-->
+<full-backup-content>
+    <exclude domain="root" />
+    <exclude domain="file" />
+    <exclude domain="database" />
+    <exclude domain="sharedpref" />
+    <exclude domain="external" />
+</full-backup-content>

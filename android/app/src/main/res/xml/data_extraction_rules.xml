@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Security audit M3. DriverOS holds sensitive offline captures (POD photos and
+  signatures, customer addresses, in-progress checklists) and the access token
+  in the WebView's local storage / IndexedDB. Auto Backup / device-to-device
+  transfer could otherwise copy that data off the device in a way that sidesteps
+  the app's own logout wipe and the shared-tablet data-remanence protections.
+
+  allowBackup is set to false in the manifest (kills cloud Auto Backup on all
+  versions). These rules additionally exclude everything from the Android 12+
+  cloud-backup AND device-transfer channels — belt-and-braces so nothing leaks
+  even if backup is ever re-enabled.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

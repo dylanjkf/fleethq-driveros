@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from 'react-router';
 import { AuthProvider } from '@/app/providers/AuthProvider';
+import { AppLockProvider } from '@/app/providers/AppLockProvider';
 import { router } from '@/app/router';
 import { initSyncEngine } from '@/lib/sync-engine';
 
@@ -34,7 +35,9 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <RouterProvider router={router} />
+        <AppLockProvider>
+          <RouterProvider router={router} />
+        </AppLockProvider>
       </AuthProvider>
     </QueryClientProvider>
   );
