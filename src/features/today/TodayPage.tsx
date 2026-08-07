@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/Button';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { StatusBar } from '@/components/ui/StatusBar';
 import { useAuth } from '@/hooks/useAuth';
+import { LockSettings } from '@/features/lock/LockSettings';
 import { enablePushNotifications, getPushSubscriptionState, isPushSupported } from '@/lib/push-registration';
 import { directionsUrl } from '@/lib/maps';
 import { useLocationReporter } from '@/hooks/useLocationReporter';
@@ -176,6 +177,9 @@ export function TodayPage() {
           <button className="text-sm text-(--text-tertiary) underline" onClick={logout}>
             Sign out
           </button>
+        </div>
+        <div className="mt-3">
+          <LockSettings />
         </div>
       </div>
 

@@ -125,11 +125,16 @@ function getDb(): Promise<IDBPDatabase<DriverOSDB>> {
           // under the next driver), not lost. Then index outbox by owner so the
           // sync engine can cheaply count another driver's held items.
           for (const store of ['outbox', 'deadLetter'] as const) {
-            const os = tx.objectStore(store);
+            // Loosely typed here: the cursor's value is a union across the two
+            // stores, so `update` won't accept a spread without a cast. The
+            // spread preserves every existing field and only adds `owner`.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const os = tx.objectStore(store) as any;
             let cursor = await os.openCursor();
             while (cursor) {
-              const value = cursor.value as { owner?: string };
-              if (value.owner === undefined) await cursor.update({ ...value, owner: UNKNOWN_OWNER });
+              if (cursor.value.owner === undefined) {
+                await cursor.update({ ...cursor.value, owner: UNKNOWN_OWNER });
+              }
               cursor = await cursor.continue();
             }
           }
