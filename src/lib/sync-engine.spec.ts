@@ -368,4 +368,68 @@ describe('dead-letter — cross-driver ownership (security audit H4)', () => {
     expect(await offlineDb.getDeadLetter('driver-a')).toHaveLength(1);
     expect(await offlineDb.getOutbox()).toEqual([]);
   });
+
+  // H4 follow-up #2: defense in depth — the offline-db primitives themselves
+  // reject a cross-driver id, so safety no longer relies on the UI only ever
+  // sourcing ids from the already-filtered banner list. These call the
+  // primitives DIRECTLY, bypassing the sync-engine/UI path entirely.
+  it('discardDeadLetter rejects a cross-driver id at the primitive layer (bypassing the UI list)', async () => {
+    await deadLetterOneFor('driver-a');
+    const [aItem] = await offlineDb.getDeadLetter('driver-a');
+
+    // Driver B is signed in but calls the primitive directly with A's id.
+    signInAs('driver-b');
+    await expect(offlineDb.discardDeadLetter(aItem.id, 'driver-b')).rejects.toBeInstanceOf(offlineDb.CrossDriverError);
+
+    // A's stranded POD is still there — nothing was discarded.
+    expect(await offlineDb.getDeadLetter('driver-a')).toHaveLength(1);
+  });
+
+  it('requeueDeadLetter rejects a cross-driver id at the primitive layer (bypassing the UI list)', async () => {
+    await deadLetterOneFor('driver-a');
+    const [aItem] = await offlineDb.getDeadLetter('driver-a');
+
+    signInAs('driver-b');
+    await expect(offlineDb.requeueDeadLetter(aItem.id, 'driver-b')).rejects.toBeInstanceOf(offlineDb.CrossDriverError);
+
+    // Not requeued: still dead-lettered under A, nothing back on the outbox.
+    expect(await offlineDb.getDeadLetter('driver-a')).toHaveLength(1);
+    expect(await offlineDb.getOutbox()).toEqual([]);
+  });
+
+  it('the primitives still let the rightful owner discard and requeue their own item', async () => {
+    await deadLetterOneFor('driver-a');
+    let [aItem] = await offlineDb.getDeadLetter('driver-a');
+
+    // Requeue as A → back on the outbox, off the dead-letter store.
+    await offlineDb.requeueDeadLetter(aItem.id, 'driver-a');
+    expect(await offlineDb.getDeadLetter('driver-a')).toEqual([]);
+    expect(await offlineDb.getOutbox()).toHaveLength(1);
+
+    // Fail it again, then discard as A → gone.
+    requestMock.mockReset();
+    requestMock.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }));
+    await syncEngine.drainOutbox();
+    [aItem] = await offlineDb.getDeadLetter('driver-a');
+    await offlineDb.discardDeadLetter(aItem.id, 'driver-a');
+    expect(await offlineDb.getDeadLetter('driver-a')).toEqual([]);
+  });
+
+  // H4 follow-up #1: a foreign driver's *failures* are surfaced with their own
+  // count (a banner), not hidden behind the owner-filtered `failed: 0`.
+  it('publishes a foreignFailed count so another driver’s failures are surfaced, not hidden', async () => {
+    await deadLetterOneFor('driver-a');
+
+    // Ownership split, computed without deserialising bodies.
+    expect(await offlineDb.countDeadLetterOwnership('driver-b')).toEqual({ own: 0, foreign: 1 });
+    expect(await offlineDb.countDeadLetterOwnership('driver-a')).toEqual({ own: 1, foreign: 0 });
+
+    // From B's session the published state hides A's item from `failed` but
+    // exposes it via `foreignFailed` (drives the StatusBar banner).
+    signInAs('driver-b');
+    const state = trackState();
+    await syncEngine.subscribeOutbox(() => {});
+    await new Promise((r) => setTimeout(r, 0));
+    expect(state.last).toMatchObject({ failed: 0, foreignFailed: 1 });
+  });
 });

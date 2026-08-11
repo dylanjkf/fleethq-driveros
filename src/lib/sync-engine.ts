@@ -1,6 +1,6 @@
 import { apiClient } from '@/api/client';
 import {
-  countDeadLetter,
+  countDeadLetterOwnership,
   countOutboxOwnership,
   discardDeadLetter,
   getDeadLetter,
@@ -16,15 +16,20 @@ import { currentOwnerId } from './session-identity';
  * Outbox state pushed to subscribers.
  *  - `pending`: items the CURRENT driver captured that are waiting to sync.
  *  - `failed`: dead-lettered items (permanent client errors).
- *  - `foreign`: items captured by a DIFFERENT driver that are stranded on this
- *    shared device — the sync engine refuses to replay them under the current
- *    session (security audit H2), so the UI surfaces them and prompts that
- *    driver to sign in and sync their own work.
+ *  - `foreign`: pending items captured by a DIFFERENT driver that are stranded on
+ *    this shared device — the sync engine refuses to replay them under the
+ *    current session (security audit H2), so the UI surfaces them and prompts
+ *    that driver to sign in and sync their own work.
+ *  - `foreignFailed`: dead-lettered items belonging to a different driver. Kept
+ *    separate from `failed` so one driver's permanent failures are surfaced
+ *    ("N failed items from another driver") rather than silently hidden behind a
+ *    0 count when the list is owner-filtered (security audit H4 follow-up).
  */
 export interface OutboxState {
   pending: number;
   failed: number;
   foreign: number;
+  foreignFailed: number;
 }
 
 type Listener = (state: OutboxState) => void;
@@ -38,8 +43,9 @@ let draining = false;
 const PERIODIC_RETRY_MS = 30_000;
 
 async function currentState(): Promise<OutboxState> {
-  const [ownership, failed] = await Promise.all([countOutboxOwnership(currentOwnerId()), countDeadLetter(currentOwnerId())]);
-  return { pending: ownership.own, failed, foreign: ownership.foreign };
+  const owner = currentOwnerId();
+  const [outbox, deadLetter] = await Promise.all([countOutboxOwnership(owner), countDeadLetterOwnership(owner)]);
+  return { pending: outbox.own, failed: deadLetter.own, foreign: outbox.foreign, foreignFailed: deadLetter.foreign };
 }
 
 async function notifyListeners(): Promise<void> {
@@ -177,8 +183,9 @@ export async function drainOutbox(): Promise<void> {
  *  signed-in driver so it never requeues a previous driver's stranded work
  *  (which would only be skipped by the owner-filtered drain anyway). */
 export async function retryDeadLettered(): Promise<void> {
-  const failed = await getDeadLetter(currentOwnerId());
-  for (const item of failed) await requeueDeadLetter(item.id);
+  const owner = currentOwnerId();
+  const failed = await getDeadLetter(owner);
+  for (const item of failed) await requeueDeadLetter(item.id, owner);
   await notifyListeners();
   await drainOutbox();
 }
@@ -195,11 +202,14 @@ export async function retryDeadLettered(): Promise<void> {
  * discards just that item (its id comes from the owner-scoped banner list).
  */
 export async function discardDeadLettered(id?: string): Promise<void> {
+  const owner = currentOwnerId();
   if (id) {
-    await discardDeadLetter(id);
+    // Pass the signed-in owner so the primitive re-checks ownership itself — the
+    // id came from the UI's filtered list, but the guard no longer trusts that.
+    await discardDeadLetter(id, owner);
   } else {
-    const failed = await getDeadLetter(currentOwnerId());
-    for (const item of failed) await discardDeadLetter(item.id);
+    const failed = await getDeadLetter(owner);
+    for (const item of failed) await discardDeadLetter(item.id, owner);
   }
   await notifyListeners();
 }

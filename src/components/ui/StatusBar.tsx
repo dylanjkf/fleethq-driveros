@@ -24,12 +24,12 @@ function describeItem(item: DeadLetterItem): string {
 /** Always-visible connectivity + pending-sync state — never hidden, per "offline behavior must be transparent." */
 export function StatusBar() {
   const { isOffline } = useAuth();
-  const { pending, failed, foreign } = useOutbox();
+  const { pending, failed, foreign, foreignFailed } = useOutbox();
   const [retrying, setRetrying] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [items, setItems] = useState<DeadLetterItem[]>([]);
 
-  if (!isOffline && pending === 0 && failed === 0 && foreign === 0) return null;
+  if (!isOffline && pending === 0 && failed === 0 && foreign === 0 && foreignFailed === 0) return null;
 
   async function handleRetry() {
     setRetrying(true);
@@ -72,9 +72,15 @@ export function StatusBar() {
         </div>
       )}
       {foreign > 0 && (
-        <div className="border-b border-black/10 bg-primary-600 px-4 py-2 text-center text-sm font-semibold text-white">
+        <div className="border-b border-black/10 bg-accent-600 px-4 py-2 text-center text-sm font-semibold text-white">
           {foreign} unsynced {foreign === 1 ? 'item' : 'items'} from another driver on this device — that driver should
           sign in to sync {foreign === 1 ? 'it' : 'them'}.
+        </div>
+      )}
+      {foreignFailed > 0 && (
+        <div className="border-b border-black/10 bg-accent-500 px-4 py-2 text-center text-sm font-semibold text-white">
+          {foreignFailed} failed {foreignFailed === 1 ? 'item' : 'items'} from another driver on this device — that
+          driver should sign in to review {foreignFailed === 1 ? 'it' : 'them'}.
         </div>
       )}
       {failed > 0 && (
