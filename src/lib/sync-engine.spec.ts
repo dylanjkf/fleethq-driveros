@@ -302,3 +302,134 @@ describe('drainOutbox — cross-driver ownership (security audit H2)', () => {
     expect(state.last).toMatchObject({ foreign: 1 });
   });
 });
+
+describe('dead-letter — cross-driver ownership (security audit H4)', () => {
+  /** Capture the latest OutboxState the sync engine publishes. */
+  function trackState(): { last: SyncEngine.OutboxState | null } {
+    const ref: { last: SyncEngine.OutboxState | null } = { last: null };
+    syncEngine.subscribeOutbox((s) => {
+      ref.last = s;
+    });
+    return ref;
+  }
+
+  /** Sign in driver A and permanently fail one mutation so it dead-letters under A. */
+  async function deadLetterOneFor(driverId: string): Promise<void> {
+    signInAs(driverId);
+    requestMock.mockReset();
+    requestMock.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }));
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/jobs/pod', body: { who: driverId } });
+    await syncEngine.drainOutbox();
+    expect(await offlineDb.getDeadLetter(driverId)).toHaveLength(1);
+  }
+
+  it('a driver’s dead-lettered work is not counted or listed for a different driver', async () => {
+    await deadLetterOneFor('driver-a');
+
+    // Driver B signs in on the same shared tablet.
+    signInAs('driver-b');
+    const state = trackState();
+    await syncEngine.subscribeOutbox(() => {}); // force a fresh publish
+    // give the async currentState() publish a tick
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // B's failed badge is 0; A's item is invisible to B but still there for A.
+    expect(await offlineDb.countDeadLetter('driver-b')).toBe(0);
+    expect(await offlineDb.getDeadLetter('driver-b')).toEqual([]);
+    expect(await offlineDb.countDeadLetter('driver-a')).toBe(1);
+    expect(state.last).toMatchObject({ failed: 0 });
+  });
+
+  it('discardDeadLettered (bulk) as another driver cannot wipe the first driver’s stranded POD', async () => {
+    await deadLetterOneFor('driver-a');
+
+    // B taps "discard all" on their (empty) banner — must not touch A's work.
+    signInAs('driver-b');
+    await syncEngine.discardDeadLettered();
+    expect(await offlineDb.getDeadLetter('driver-a')).toHaveLength(1);
+
+    // A signs back in and clears their own — that IS allowed.
+    signInAs('driver-a');
+    await syncEngine.discardDeadLettered();
+    expect(await offlineDb.getDeadLetter('driver-a')).toEqual([]);
+  });
+
+  it('retryDeadLettered as another driver does not requeue the first driver’s work', async () => {
+    await deadLetterOneFor('driver-a');
+
+    signInAs('driver-b');
+    requestMock.mockReset();
+    requestMock.mockResolvedValue({});
+    await syncEngine.retryDeadLettered();
+
+    // Nothing of B's to retry; A's dead-letter is untouched (not requeued/sent).
+    expect(requestMock).not.toHaveBeenCalled();
+    expect(await offlineDb.getDeadLetter('driver-a')).toHaveLength(1);
+    expect(await offlineDb.getOutbox()).toEqual([]);
+  });
+
+  // H4 follow-up #2: defense in depth — the offline-db primitives themselves
+  // reject a cross-driver id, so safety no longer relies on the UI only ever
+  // sourcing ids from the already-filtered banner list. These call the
+  // primitives DIRECTLY, bypassing the sync-engine/UI path entirely.
+  it('discardDeadLetter rejects a cross-driver id at the primitive layer (bypassing the UI list)', async () => {
+    await deadLetterOneFor('driver-a');
+    const [aItem] = await offlineDb.getDeadLetter('driver-a');
+
+    // Driver B is signed in but calls the primitive directly with A's id.
+    signInAs('driver-b');
+    await expect(offlineDb.discardDeadLetter(aItem.id, 'driver-b')).rejects.toBeInstanceOf(offlineDb.CrossDriverError);
+
+    // A's stranded POD is still there — nothing was discarded.
+    expect(await offlineDb.getDeadLetter('driver-a')).toHaveLength(1);
+  });
+
+  it('requeueDeadLetter rejects a cross-driver id at the primitive layer (bypassing the UI list)', async () => {
+    await deadLetterOneFor('driver-a');
+    const [aItem] = await offlineDb.getDeadLetter('driver-a');
+
+    signInAs('driver-b');
+    await expect(offlineDb.requeueDeadLetter(aItem.id, 'driver-b')).rejects.toBeInstanceOf(offlineDb.CrossDriverError);
+
+    // Not requeued: still dead-lettered under A, nothing back on the outbox.
+    expect(await offlineDb.getDeadLetter('driver-a')).toHaveLength(1);
+    expect(await offlineDb.getOutbox()).toEqual([]);
+  });
+
+  it('the primitives still let the rightful owner discard and requeue their own item', async () => {
+    await deadLetterOneFor('driver-a');
+    let [aItem] = await offlineDb.getDeadLetter('driver-a');
+
+    // Requeue as A → back on the outbox, off the dead-letter store.
+    await offlineDb.requeueDeadLetter(aItem.id, 'driver-a');
+    expect(await offlineDb.getDeadLetter('driver-a')).toEqual([]);
+    expect(await offlineDb.getOutbox()).toHaveLength(1);
+
+    // Fail it again, then discard as A → gone.
+    requestMock.mockReset();
+    requestMock.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }));
+    await syncEngine.drainOutbox();
+    [aItem] = await offlineDb.getDeadLetter('driver-a');
+    await offlineDb.discardDeadLetter(aItem.id, 'driver-a');
+    expect(await offlineDb.getDeadLetter('driver-a')).toEqual([]);
+  });
+
+  // H4 follow-up #1: a foreign driver's *failures* are surfaced with their own
+  // count (a banner), not hidden behind the owner-filtered `failed: 0`.
+  it('publishes a foreignFailed count so another driver’s failures are surfaced, not hidden', async () => {
+    await deadLetterOneFor('driver-a');
+
+    // Ownership split, computed without deserialising bodies.
+    expect(await offlineDb.countDeadLetterOwnership('driver-b')).toEqual({ own: 0, foreign: 1 });
+    expect(await offlineDb.countDeadLetterOwnership('driver-a')).toEqual({ own: 1, foreign: 0 });
+
+    // From B's session the published state hides A's item from `failed` but
+    // exposes it via `foreignFailed` (drives the StatusBar banner).
+    signInAs('driver-b');
+    const state = trackState();
+    await syncEngine.subscribeOutbox(() => {});
+    await new Promise((r) => setTimeout(r, 0));
+    expect(state.last).toMatchObject({ failed: 0, foreignFailed: 1 });
+  });
+});

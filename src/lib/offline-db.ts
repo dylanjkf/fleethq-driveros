@@ -92,18 +92,19 @@ interface DriverOSDB extends DBSchema {
   // `byCreatedAt` lets queueMutation find the current max ordering key with a
   // key-cursor, instead of loading every queued body (including base64 photos)
   // into memory just to compute it — see queueMutation. `byOwner` lets the sync
-  // engine count another driver's held items without deserialising bodies.
+  // engine count another driver's held items (pending on `outbox`, permanently
+  // failed on `deadLetter`) without deserialising bodies.
   outbox: { key: string; value: OutboxItem; indexes: { byCreatedAt: number; byOwner: string } };
   cache: { key: string; value: CacheRow };
   checklistDrafts: { key: string; value: ChecklistDraftRow };
-  deadLetter: { key: string; value: DeadLetterItem };
+  deadLetter: { key: string; value: DeadLetterItem; indexes: { byOwner: string } };
 }
 
 let dbPromise: Promise<IDBPDatabase<DriverOSDB>> | null = null;
 
 function getDb(): Promise<IDBPDatabase<DriverOSDB>> {
   if (!dbPromise) {
-    dbPromise = openDB<DriverOSDB>('driveros', 5, {
+    dbPromise = openDB<DriverOSDB>('driveros', 6, {
       async upgrade(db, oldVersion, _newVersion, tx) {
         if (oldVersion < 1) {
           db.createObjectStore('outbox', { keyPath: 'id' });
@@ -139,6 +140,13 @@ function getDb(): Promise<IDBPDatabase<DriverOSDB>> {
             }
           }
           tx.objectStore('outbox').createIndex('byOwner', 'owner');
+        }
+        if (oldVersion < 6) {
+          // Index the dead-letter store by owner too, so a foreign driver's
+          // permanently-failed items can be counted for the "N failed items from
+          // another driver" banner without deserialising bodies (H4 follow-up).
+          // v5's cursor loop already backfilled `owner` on existing items.
+          tx.objectStore('deadLetter').createIndex('byOwner', 'owner');
         }
       },
       // An open blocked by another still-open connection at an older version
@@ -302,25 +310,78 @@ export async function moveToDeadLetter(item: OutboxItem, lastError: string): Pro
   await tx.done;
 }
 
-export async function getDeadLetter(): Promise<DeadLetterItem[]> {
+/**
+ * Dead-lettered items, oldest first. On a shared tablet the dead-letter store
+ * survives logout, so it can hold the *previous* driver's permanently-failed
+ * mutations (their POD, their fault report). Passing `activeOwner` scopes the
+ * result to that driver so one driver never sees, retries, or discards another
+ * driver's failed work; omit it only for maintenance paths that genuinely need
+ * the whole store. `null` (nobody signed in) matches nothing. Security audit H4.
+ */
+export async function getDeadLetter(activeOwner?: string | null): Promise<DeadLetterItem[]> {
   const db = await getDb();
   const items = await db.getAll('deadLetter');
-  return items.sort((a, b) => a.createdAt - b.createdAt);
+  const scoped = activeOwner === undefined ? items : items.filter((i) => i.owner === activeOwner);
+  return scoped.sort((a, b) => a.createdAt - b.createdAt);
 }
 
-export async function countDeadLetter(): Promise<number> {
+/** Count of dead-lettered items, scoped to `activeOwner` when provided (see getDeadLetter). */
+export async function countDeadLetter(activeOwner?: string | null): Promise<number> {
+  if (activeOwner === undefined) {
+    const db = await getDb();
+    return db.count('deadLetter');
+  }
+  return (await getDeadLetter(activeOwner)).length;
+}
+
+/**
+ * Split the dead-letter store into the current driver's own permanently-failed
+ * items and those belonging to a *previous* driver still on a shared device,
+ * without deserialising bodies (uses the byOwner index counts). Mirrors
+ * countOutboxOwnership so the UI can surface a "N failed items from another
+ * driver" banner instead of hiding a foreign driver's failures behind a 0 count
+ * (security audit H4 follow-up). A null activeOwner (logged out) owns nothing.
+ */
+export async function countDeadLetterOwnership(activeOwner: string | null): Promise<{ own: number; foreign: number }> {
   const db = await getDb();
-  return db.count('deadLetter');
+  const total = await db.count('deadLetter');
+  const own = activeOwner ? await db.countFromIndex('deadLetter', 'byOwner', activeOwner) : 0;
+  return { own, foreign: total - own };
 }
 
-/** Put a dead-lettered item back on the queue (reset attempts) so a driver can
- *  retry once the underlying cause is resolved. Ordering is preserved via the
- *  item's original createdAt. */
-export async function requeueDeadLetter(id: string): Promise<void> {
+/**
+ * Thrown when a dead-letter mutation targets an item owned by a driver other
+ * than the `activeOwner` supplied. Defense in depth: the requeue/discard
+ * primitives reject cross-driver ids at this layer directly, so safety no longer
+ * depends on the UI only ever sourcing ids from an already-filtered list — any
+ * future direct caller is rejected too (security audit H4 follow-up).
+ */
+export class CrossDriverError extends Error {
+  constructor(action: 'requeue' | 'discard', id: string) {
+    super(`Refusing to ${action} dead-letter item ${id}: it belongs to another driver.`);
+    this.name = 'CrossDriverError';
+  }
+}
+
+/**
+ * Put a dead-lettered item back on the queue (reset attempts) so a driver can
+ * retry once the underlying cause is resolved. Ordering is preserved via the
+ * item's original createdAt.
+ *
+ * When `activeOwner` is provided (a driver id, or `null` for logged-out), the
+ * item's owner must match or a {@link CrossDriverError} is thrown before any
+ * write — a driver can never requeue another driver's stranded work even by
+ * calling this directly. Omit `activeOwner` only for maintenance paths that
+ * genuinely operate across the whole store.
+ */
+export async function requeueDeadLetter(id: string, activeOwner?: string | null): Promise<void> {
   const db = await getDb();
   const tx = db.transaction(['outbox', 'deadLetter'], 'readwrite');
   const item = await tx.objectStore('deadLetter').get(id);
   if (item) {
+    if (activeOwner !== undefined && item.owner !== activeOwner) {
+      throw new CrossDriverError('requeue', id);
+    }
     const { failedAt: _failedAt, ...outboxItem } = item;
     await tx.objectStore('outbox').put({ ...outboxItem, attempts: 0, lastError: undefined });
     await tx.objectStore('deadLetter').delete(id);
@@ -328,8 +389,20 @@ export async function requeueDeadLetter(id: string): Promise<void> {
   await tx.done;
 }
 
-export async function discardDeadLetter(id: string): Promise<void> {
+/**
+ * Permanently discard a dead-lettered item. `activeOwner` enforces the same
+ * cross-driver guard as {@link requeueDeadLetter}: with an owner supplied, an
+ * item belonging to a different driver is rejected with {@link CrossDriverError}
+ * rather than deleted. Omit it only for whole-store maintenance paths.
+ */
+export async function discardDeadLetter(id: string, activeOwner?: string | null): Promise<void> {
   const db = await getDb();
+  if (activeOwner !== undefined) {
+    const item = await db.get('deadLetter', id);
+    if (item && item.owner !== activeOwner) {
+      throw new CrossDriverError('discard', id);
+    }
+  }
   await db.delete('deadLetter', id);
 }
 

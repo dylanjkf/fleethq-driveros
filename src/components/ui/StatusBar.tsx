@@ -3,6 +3,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useOutbox } from '@/hooks/useOutbox';
 import { discardDeadLettered, retryDeadLettered } from '@/lib/sync-engine';
 import { getDeadLetter, type DeadLetterItem } from '@/lib/offline-db';
+import { currentOwnerId } from '@/lib/session-identity';
 
 /** A queued mutation's URL made human — "Delivery", "Fuel entry", etc. — so the
  *  driver can tell what actually failed rather than reading an API path. */
@@ -23,12 +24,12 @@ function describeItem(item: DeadLetterItem): string {
 /** Always-visible connectivity + pending-sync state — never hidden, per "offline behavior must be transparent." */
 export function StatusBar() {
   const { isOffline } = useAuth();
-  const { pending, failed, foreign } = useOutbox();
+  const { pending, failed, foreign, foreignFailed } = useOutbox();
   const [retrying, setRetrying] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [items, setItems] = useState<DeadLetterItem[]>([]);
 
-  if (!isOffline && pending === 0 && failed === 0 && foreign === 0) return null;
+  if (!isOffline && pending === 0 && failed === 0 && foreign === 0 && foreignFailed === 0) return null;
 
   async function handleRetry() {
     setRetrying(true);
@@ -42,13 +43,15 @@ export function StatusBar() {
   async function toggleDetails() {
     const next = !expanded;
     setExpanded(next);
-    if (next) setItems(await getDeadLetter());
+    // Only ever show the signed-in driver's own failed work — never a previous
+    // driver's stranded mutations on a shared tablet (security audit H4).
+    if (next) setItems(await getDeadLetter(currentOwnerId()));
   }
 
   async function handleDiscard(id?: string) {
     await discardDeadLettered(id);
     // Keep the open list in sync with what's left.
-    setItems(await getDeadLetter());
+    setItems(await getDeadLetter(currentOwnerId()));
   }
 
   return (
@@ -69,9 +72,15 @@ export function StatusBar() {
         </div>
       )}
       {foreign > 0 && (
-        <div className="border-b border-black/10 bg-primary-600 px-4 py-2 text-center text-sm font-semibold text-white">
+        <div className="border-b border-black/10 bg-accent-600 px-4 py-2 text-center text-sm font-semibold text-white">
           {foreign} unsynced {foreign === 1 ? 'item' : 'items'} from another driver on this device — that driver should
           sign in to sync {foreign === 1 ? 'it' : 'them'}.
+        </div>
+      )}
+      {foreignFailed > 0 && (
+        <div className="border-b border-black/10 bg-accent-500 px-4 py-2 text-center text-sm font-semibold text-white">
+          {foreignFailed} failed {foreignFailed === 1 ? 'item' : 'items'} from another driver on this device — that
+          driver should sign in to review {foreignFailed === 1 ? 'it' : 'them'}.
         </div>
       )}
       {failed > 0 && (
