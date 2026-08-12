@@ -1,3 +1,5 @@
+// Client-side offline state is stored UNENCRYPTED in IndexedDB — see the
+// deliberate plaintext tradeoff and its mitigations in docs/OFFLINE_STORAGE.md.
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import { currentOwnerId, UNKNOWN_OWNER } from './session-identity';
 
