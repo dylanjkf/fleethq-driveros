@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { openFormReferenceDocument, submitForm } from '@/api/forms';
 import { Button } from '@/components/ui/Button';
 import { ApiClientError } from '@/api/client';
+import { OutboxQuotaError } from '@/lib/offline-db';
 import type { FormTemplate } from '@/api/types';
 
 interface FormRunnerProps {
@@ -102,7 +103,10 @@ export function FormRunner({ template, assetId, assetName, operatorId, operatorN
           : 'Form submitted.',
       );
     } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
+      // A quota failure means the form was NOT saved — surface it plainly and
+      // keep the driver on the page so their answers aren't silently lost.
+      if (err instanceof OutboxQuotaError) setError(err.message);
+      else setError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
     } finally {
       setIsSubmitting(false);
     }

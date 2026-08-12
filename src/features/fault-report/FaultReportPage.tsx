@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/Button';
 import { StatusBar } from '@/components/ui/StatusBar';
 import { useAuth } from '@/hooks/useAuth';
 import { ApiClientError } from '@/api/client';
+import { OutboxQuotaError } from '@/lib/offline-db';
 
 /**
  * Fault/Damage Reporting (04-DriverOS/DriverOS_Overview.md): "photo + note
@@ -47,7 +48,10 @@ export function FaultReportPage() {
       );
       setTimeout(() => navigate('/'), 1500);
     } catch (err) {
-      setFormError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
+      // A quota failure means the report was NOT saved — surface it plainly and
+      // keep the driver on the page so nothing is silently lost.
+      if (err instanceof OutboxQuotaError) setFormError(err.message);
+      else setFormError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
     } finally {
       setIsSubmitting(false);
     }

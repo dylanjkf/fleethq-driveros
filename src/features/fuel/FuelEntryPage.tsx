@@ -2,12 +2,10 @@ import { useState, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { recordFuelEntry } from '@/api/fuel';
 import { ApiClientError } from '@/api/client';
-import { compressImageFile } from '@/lib/image';
+import { OutboxQuotaError } from '@/lib/offline-db';
+import { compressImageFile, MAX_PHOTO_BYTES } from '@/lib/image';
 import { Button } from '@/components/ui/Button';
 import { StatusBar } from '@/components/ui/StatusBar';
-
-/** Same ceiling the POD photo uses — a safety net above compression. */
-const MAX_PHOTO_BYTES = 7_500_000;
 
 /**
  * Record a fuel-card purchase. Captures exactly what the office needs to
@@ -91,7 +89,10 @@ export function FuelEntryPage() {
       );
       setTimeout(() => navigate('/'), 1500);
     } catch (err) {
-      setFormError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
+      // A quota failure means the entry was NOT saved — surface it plainly and
+      // keep the driver on the page (no navigate) so nothing is silently lost.
+      if (err instanceof OutboxQuotaError) setFormError(err.message);
+      else setFormError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
     } finally {
       setIsSubmitting(false);
     }

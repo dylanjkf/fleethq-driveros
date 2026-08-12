@@ -18,6 +18,10 @@ const VARIANT_CLASSES: Record<NonNullable<ButtonProps['variant']>, string> = {
 export function Button({ variant = 'primary', className = '', ...props }: ButtonProps) {
   return (
     <button
+      // Default to a non-submitting button — the native default is `submit`,
+      // which fires an unintended form submit when one of these sits in a form.
+      // A caller that IS the form's submit passes `type="submit"`, overriding this.
+      type="button"
       className={`min-h-14 w-full rounded-2xl px-6 text-lg font-semibold transition-all duration-200 [transition-timing-function:var(--ease-out-soft)] active:scale-[0.98] disabled:opacity-50 ${VARIANT_CLASSES[variant]} ${className}`}
       {...props}
     />

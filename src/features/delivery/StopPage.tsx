@@ -8,13 +8,9 @@ import { StatusBar } from '@/components/ui/StatusBar';
 import { SignaturePad } from '@/components/ui/SignaturePad';
 import { ApiClientError } from '@/api/client';
 import { OutboxQuotaError } from '@/lib/offline-db';
-import { compressImageFile } from '@/lib/image';
+import { compressImageFile, MAX_PHOTO_BYTES } from '@/lib/image';
 import { directionsUrl } from '@/lib/maps';
 import type { StopFailureReason, StopOutcome } from '@/api/types';
-
-/** Client-side ceiling, comfortably under the server's 8 MB decoded cap even
- *  after base64 — a safety net; compression keeps real photos far below this. */
-const MAX_PHOTO_BYTES = 7_500_000;
 
 type Outcome = Exclude<StopOutcome, 'PENDING'>;
 
@@ -93,8 +89,11 @@ export function StopPage() {
         const res = await getStopParcels(jobId, stopId);
         setParcels(res.parcels);
       }
-    } catch {
-      // Leave the optimistic state; the outbox (if queued) or a later reload fixes it.
+    } catch (err) {
+      // A quota failure means the scan was NOT queued — surface it so the driver
+      // knows the outbox is full, rather than swallowing it silently. Other
+      // errors leave the optimistic state; the outbox or a later reload fixes it.
+      if (err instanceof OutboxQuotaError) setError(err.message);
     } finally {
       setScanning(false);
     }

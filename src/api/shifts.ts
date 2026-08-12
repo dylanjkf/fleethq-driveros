@@ -1,6 +1,6 @@
-import { apiClient, ApiClientError } from './client';
-import { getCache, setCache, queueMutation } from '@/lib/offline-db';
-import { drainOutbox } from '@/lib/sync-engine';
+import { apiClient } from './client';
+import { getCache, setCache } from '@/lib/offline-db';
+import { postOrQueue } from '@/lib/offline-post';
 
 export interface Shift {
   id: string;
@@ -42,27 +42,12 @@ export async function getCurrentShift(): Promise<CurrentShiftResult> {
  * action being silently lost — CLAUDE.md's "offline-first, always" applies
  * to clocking in/out exactly as much as it does to a delivery.
  */
-async function postShiftAction(url: string, idempotentReplayCode: string): Promise<{ queued: boolean }> {
+function postShiftAction(url: string, idempotentReplayCode: string): Promise<{ queued: boolean }> {
   // On an outbox replay, this specific 409 means the shift already reached the
   // desired state on an earlier attempt whose response was lost — so the sync
   // engine treats it as success, not a dead-lettered failure. (This applies
-  // only to replays; a fresh online 409 below still surfaces as a real error.)
-  const idempotentReplayCodes = [idempotentReplayCode];
-  if (!navigator.onLine) {
-    await queueMutation({ method: 'POST', url, body: {}, idempotentReplayCodes });
-    return { queued: true };
-  }
-  try {
-    await apiClient.post(url);
-    return { queued: false };
-  } catch (err) {
-    if (err instanceof ApiClientError && err.status === 0) {
-      await queueMutation({ method: 'POST', url, body: {}, idempotentReplayCodes });
-      void drainOutbox();
-      return { queued: true };
-    }
-    throw err;
-  }
+  // only to replays; a fresh online 409 still surfaces as a real error.)
+  return postOrQueue(url, { idempotentReplayCodes: [idempotentReplayCode] });
 }
 
 export function startShift(): Promise<{ queued: boolean }> {

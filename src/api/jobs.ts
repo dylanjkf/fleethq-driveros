@@ -1,6 +1,6 @@
-import { apiClient, ApiClientError } from './client';
-import { getCache, setCache, queueMutation } from '@/lib/offline-db';
-import { drainOutbox } from '@/lib/sync-engine';
+import { apiClient } from './client';
+import { getCache, setCache } from '@/lib/offline-db';
+import { postOrQueue } from '@/lib/offline-post';
 import type { Job, Paginated, StopFailureReason, StopOutcome } from './types';
 
 const TODAY_CACHE_KEY = 'today-jobs';
@@ -100,19 +100,5 @@ export async function completeStop(
   input: CompleteStopInput,
 ): Promise<{ queued: boolean }> {
   const url = `/v1/jobs/${jobId}/stops/${stopId}/complete`;
-  if (!navigator.onLine) {
-    await queueMutation({ method: 'POST', url, body: input });
-    return { queued: true };
-  }
-  try {
-    await apiClient.post(url, input);
-    return { queued: false };
-  } catch (err) {
-    if (err instanceof ApiClientError && err.status === 0) {
-      await queueMutation({ method: 'POST', url, body: input });
-      void drainOutbox();
-      return { queued: true };
-    }
-    throw err;
-  }
+  return postOrQueue(url, { body: input });
 }

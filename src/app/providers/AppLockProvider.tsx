@@ -1,7 +1,6 @@
 import { createContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { tokenStore } from '@/api/token-store';
 import {
-  DEFAULT_LOCK_TIMEOUT_MS,
   disableLock,
   getLockTimeoutMs,
   isLockConfigured,
@@ -128,5 +127,3 @@ export function AppLockProvider({ children }: { children: ReactNode }) {
 
   return <AppLockContext.Provider value={value}>{children}</AppLockContext.Provider>;
 }
-
-export { DEFAULT_LOCK_TIMEOUT_MS };

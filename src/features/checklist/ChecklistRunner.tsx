@@ -190,7 +190,10 @@ export function ChecklistRunner({ template, assetId, assetName, onDone }: Checkl
           : 'Inspection submitted.',
       );
     } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
+      // A quota failure means the submission was NOT queued — say so plainly so
+      // the inspection isn't silently lost on a full device.
+      if (err instanceof OutboxQuotaError) setError(err.message);
+      else setError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
     } finally {
       setIsSubmitting(false);
     }

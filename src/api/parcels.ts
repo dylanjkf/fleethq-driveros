@@ -1,6 +1,6 @@
-import { apiClient, ApiClientError } from './client';
-import { getCache, setCache, queueMutation } from '@/lib/offline-db';
-import { drainOutbox } from '@/lib/sync-engine';
+import { apiClient } from './client';
+import { getCache, setCache } from '@/lib/offline-db';
+import { postOrQueue } from '@/lib/offline-post';
 
 export interface Parcel {
   id: string;
@@ -47,20 +47,5 @@ export async function getStopParcels(jobId: string, stopId: string): Promise<Par
  */
 export async function scanStopParcel(jobId: string, stopId: string, reference: string): Promise<{ queued: boolean }> {
   const url = `/v1/jobs/${jobId}/stops/${stopId}/parcels/scan`;
-  const body = { reference };
-  if (!navigator.onLine) {
-    await queueMutation({ method: 'POST', url, body });
-    return { queued: true };
-  }
-  try {
-    await apiClient.post(url, body);
-    return { queued: false };
-  } catch (err) {
-    if (err instanceof ApiClientError && err.status === 0) {
-      await queueMutation({ method: 'POST', url, body });
-      void drainOutbox();
-      return { queued: true };
-    }
-    throw err;
-  }
+  return postOrQueue(url, { body: { reference } });
 }
