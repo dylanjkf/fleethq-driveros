@@ -93,8 +93,11 @@ export function StopPage() {
         const res = await getStopParcels(jobId, stopId);
         setParcels(res.parcels);
       }
-    } catch {
-      // Leave the optimistic state; the outbox (if queued) or a later reload fixes it.
+    } catch (err) {
+      // A quota failure means the scan was NOT queued — surface it so the driver
+      // knows the outbox is full, rather than swallowing it silently. Other
+      // errors leave the optimistic state; the outbox or a later reload fixes it.
+      if (err instanceof OutboxQuotaError) setError(err.message);
     } finally {
       setScanning(false);
     }

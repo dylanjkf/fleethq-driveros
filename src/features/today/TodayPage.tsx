@@ -14,6 +14,7 @@ import { LockSettings } from '@/features/lock/LockSettings';
 import { enablePushNotifications, getPushSubscriptionState, isPushSupported } from '@/lib/push-registration';
 import { directionsUrl } from '@/lib/maps';
 import { useLocationReporter } from '@/hooks/useLocationReporter';
+import { OutboxQuotaError } from '@/lib/offline-db';
 import type { JobStop } from '@/api/types';
 
 const PUSH_DISMISSED_KEY = 'driveros:push-banner-dismissed';
@@ -106,13 +107,21 @@ export function TodayPage() {
     }
   }
 
+  // A quota failure means the shift change was NOT queued — surface it through
+  // the shift widget's own note so the driver knows the outbox is full.
+  function onShiftActionError(err: unknown) {
+    if (err instanceof OutboxQuotaError) setShiftSyncNote(err.message);
+  }
+
   const startShiftMutation = useMutation({
     mutationFn: startShift,
     onSuccess: (result) => onShiftActionSettled(result, 'start'),
+    onError: onShiftActionError,
   });
   const endShiftMutation = useMutation({
     mutationFn: endShift,
     onSuccess: (result) => onShiftActionSettled(result, 'end'),
+    onError: onShiftActionError,
   });
 
   const [showPushBanner, setShowPushBanner] = useState(false);

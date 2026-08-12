@@ -5,6 +5,7 @@ import { getThread, sendMessage } from '@/api/messages';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { StatusBar } from '@/components/ui/StatusBar';
 import { ApiClientError } from '@/api/client';
+import { OutboxQuotaError } from '@/lib/offline-db';
 
 interface PendingMessage {
   tempId: string;
@@ -60,7 +61,9 @@ export function MessagesPage() {
     } catch (err) {
       setPending((p) => p.filter((m) => m.tempId !== tempId));
       setDraft(body);
-      setError(err instanceof ApiClientError ? err.message : 'Could not send. Try again.');
+      // A quota failure means the message was NOT queued — say so plainly.
+      if (err instanceof OutboxQuotaError) setError(err.message);
+      else setError(err instanceof ApiClientError ? err.message : 'Could not send. Try again.');
     }
   }
 

@@ -2,6 +2,7 @@ import { useState, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { recordFuelEntry } from '@/api/fuel';
 import { ApiClientError } from '@/api/client';
+import { OutboxQuotaError } from '@/lib/offline-db';
 import { compressImageFile } from '@/lib/image';
 import { Button } from '@/components/ui/Button';
 import { StatusBar } from '@/components/ui/StatusBar';
@@ -91,7 +92,10 @@ export function FuelEntryPage() {
       );
       setTimeout(() => navigate('/'), 1500);
     } catch (err) {
-      setFormError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
+      // A quota failure means the entry was NOT saved — surface it plainly and
+      // keep the driver on the page (no navigate) so nothing is silently lost.
+      if (err instanceof OutboxQuotaError) setFormError(err.message);
+      else setFormError(err instanceof ApiClientError ? err.message : 'Could not submit. Try again.');
     } finally {
       setIsSubmitting(false);
     }
