@@ -2,7 +2,9 @@ import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { applyStopOutcome, cacheStopOutcome, completeStop, type TodayJobs } from '@/api/jobs';
-import { getStopParcels, scanStopParcel, type Parcel } from '@/api/parcels';
+import { getStopParcels, type Parcel } from '@/api/parcels';
+import { submitScannedReference } from './scan-submit';
+import { scanBarcodeWithCamera } from '@/lib/barcode-scanner';
 import { Button } from '@/components/ui/Button';
 import { StatusBar } from '@/components/ui/StatusBar';
 import { SignaturePad } from '@/components/ui/SignaturePad';
@@ -53,6 +55,10 @@ export function StopPage() {
   const [parcels, setParcels] = useState<Parcel[]>([]);
   const [scanInput, setScanInput] = useState('');
   const [scanning, setScanning] = useState(false);
+  // Non-blocking status for the camera scanner (permission denied, no-read,
+  // etc.). Kept separate from `error` so it shows next to the scan controls
+  // without disturbing the delivery form — manual entry stays available.
+  const [scanMessage, setScanMessage] = useState<string | null>(null);
 
   // Load any parcels the office pre-listed for this stop. Best-effort: offline
   // (or a stop with no parcels) simply shows the section empty — parcels are an
@@ -70,33 +76,30 @@ export function StopPage() {
 
   const scannedCount = parcels.filter((p) => p.scannedAt).length;
 
+  // Resolve any raw scanned string — from the manual input OR the camera —
+  // through the ONE shared matching path (see scan-submit.ts / scanStopParcel).
+  async function resolveScan(raw: string) {
+    if (!jobId || !stopId) return;
+    await submitScannedReference(raw, { jobId, stopId, setParcels, setScanning, setError });
+  }
+
   async function onScan(e: FormEvent) {
     e.preventDefault();
-    const reference = scanInput.trim();
-    if (!reference || !jobId || !stopId) return;
-    setScanning(true);
-    // Optimistic: reflect the scan immediately so a fast scanner keeps up.
-    setParcels((prev) => {
-      const existing = prev.find((p) => p.reference === reference);
-      if (existing) return prev.map((p) => (p.reference === reference ? { ...p, scannedAt: p.scannedAt ?? new Date().toISOString() } : p));
-      return [...prev, { id: `local-${reference}`, reference, label: null, scannedAt: new Date().toISOString() }];
-    });
+    const raw = scanInput;
     setScanInput('');
-    try {
-      const { queued } = await scanStopParcel(jobId, stopId, reference);
-      // When it reached the server, reconcile with the authoritative list.
-      if (!queued) {
-        const res = await getStopParcels(jobId, stopId);
-        setParcels(res.parcels);
-      }
-    } catch (err) {
-      // A quota failure means the scan was NOT queued — surface it so the driver
-      // knows the outbox is full, rather than swallowing it silently. Other
-      // errors leave the optimistic state; the outbox or a later reload fixes it.
-      if (err instanceof OutboxQuotaError) setError(err.message);
-    } finally {
-      setScanning(false);
+    await resolveScan(raw);
+  }
+
+  async function onCameraScan() {
+    setScanMessage(null);
+    const result = await scanBarcodeWithCamera();
+    if (result.ok) {
+      await resolveScan(result.value);
+    } else if (result.message) {
+      // permission / unsupported / no-read: tell the driver, keep manual entry.
+      setScanMessage(result.message);
     }
+    // 'cancelled' (empty message) → driver backed out; say nothing.
   }
 
   async function onPickPhoto(e: ChangeEvent<HTMLInputElement>) {
@@ -223,19 +226,33 @@ export function StopPage() {
             </div>
           )}
 
-          <form onSubmit={onScan} className="flex gap-2">
-            <input
-              className="min-h-14 flex-1 rounded-2xl border border-(--border-subtle) bg-(--surface-1) px-4 text-lg"
-              placeholder="Scan or enter parcel barcode"
-              value={scanInput}
-              onChange={(e) => setScanInput(e.target.value)}
-              autoComplete="off"
-              inputMode="text"
-            />
-            <button type="submit" disabled={scanning || !scanInput.trim()} className="min-h-14 rounded-2xl bg-accent-600 px-5 text-sm font-semibold text-white disabled:opacity-50">
-              {scanning ? '…' : 'Scan'}
+          <div className="space-y-2">
+            {/* Manual entry — HID/Bluetooth scanner or typed by hand. ALWAYS
+                available, never hidden behind an error state. */}
+            <form onSubmit={onScan} className="flex gap-2">
+              <input
+                className="min-h-14 flex-1 rounded-2xl border border-(--border-subtle) bg-(--surface-1) px-4 text-lg"
+                placeholder="Scan or enter parcel barcode"
+                value={scanInput}
+                onChange={(e) => setScanInput(e.target.value)}
+                autoComplete="off"
+                inputMode="text"
+              />
+              <button type="submit" disabled={scanning || !scanInput.trim()} className="min-h-14 rounded-2xl bg-accent-600 px-5 text-sm font-semibold text-white disabled:opacity-50">
+                {scanning ? '…' : 'Scan'}
+              </button>
+            </form>
+            {/* Camera scan — same matching path as the manual input above. */}
+            <button
+              type="button"
+              onClick={() => void onCameraScan()}
+              disabled={scanning}
+              className="flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl border border-accent-500/40 bg-accent-500/5 text-sm font-semibold text-accent-500 disabled:opacity-50"
+            >
+              Scan with camera
             </button>
-          </form>
+            {scanMessage && <p className="text-sm text-(--text-tertiary)">{scanMessage}</p>}
+          </div>
 
           <div className="flex gap-3">
             <button
