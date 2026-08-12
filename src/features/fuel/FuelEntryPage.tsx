@@ -3,12 +3,9 @@ import { useNavigate, useSearchParams } from 'react-router';
 import { recordFuelEntry } from '@/api/fuel';
 import { ApiClientError } from '@/api/client';
 import { OutboxQuotaError } from '@/lib/offline-db';
-import { compressImageFile } from '@/lib/image';
+import { compressImageFile, MAX_PHOTO_BYTES } from '@/lib/image';
 import { Button } from '@/components/ui/Button';
 import { StatusBar } from '@/components/ui/StatusBar';
-
-/** Same ceiling the POD photo uses — a safety net above compression. */
-const MAX_PHOTO_BYTES = 7_500_000;
 
 /**
  * Record a fuel-card purchase. Captures exactly what the office needs to

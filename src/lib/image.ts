@@ -15,6 +15,12 @@ const MAX_EDGE = 1600;
 /** JPEG quality for the re-encode. */
 const QUALITY = 0.7;
 
+/** Post-compression safety ceiling for a queued photo attachment — comfortably
+ *  under the server's 8 MB decoded cap even after base64. Compression keeps real
+ *  photos far below this; it's a net, not the primary guard. Shared by every
+ *  capture page so the ceiling can't drift between them. */
+export const MAX_PHOTO_BYTES = 7_500_000;
+
 export interface CompressedImage {
   /** A `data:` URL (the same shape the capture flow already produced). */
   dataUrl: string;
