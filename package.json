@@ -20,7 +20,7 @@
     "@capacitor/android": "^8.4.2",
     "@capacitor/core": "^8.4.2",
     "@capacitor/ios": "^8.4.2",
-    "@sentry/react": "^9.47.1",
+    "@sentry/react": "^10.69.0",
     "@tailwindcss/vite": "^4.3.2",
     "@tanstack/react-query": "^5.101.2",
     "axios": "^1.18.1",
