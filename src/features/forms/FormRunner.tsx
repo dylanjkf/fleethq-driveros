@@ -3,6 +3,7 @@ import { openFormReferenceDocument, submitForm } from '@/api/forms';
 import { Button } from '@/components/ui/Button';
 import { ApiClientError } from '@/api/client';
 import { OutboxQuotaError } from '@/lib/offline-db';
+import { FormFields, isEmptyValue, visibleFieldsFor } from './FormFields';
 import type { FormTemplate } from '@/api/types';
 
 interface FormRunnerProps {
@@ -13,18 +14,6 @@ interface FormRunnerProps {
   operatorId: string | null;
   operatorName: string | null;
   onDone: (message: string) => void;
-}
-
-function isVisible(showIfFieldId: string | null, showIfValue: string | null, answers: Record<string, unknown>): boolean {
-  if (!showIfFieldId) return true;
-  const controllerValue = answers[showIfFieldId];
-  if (controllerValue === undefined) return false;
-  if (Array.isArray(controllerValue)) return controllerValue.includes(showIfValue);
-  return String(controllerValue) === showIfValue;
-}
-
-function isEmptyValue(value: unknown): boolean {
-  return value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0);
 }
 
 /**
@@ -57,19 +46,10 @@ export function FormRunner({ template, assetId, assetName, operatorId, operatorN
   const [error, setError] = useState<string | null>(null);
   const [referenceError, setReferenceError] = useState<string | null>(null);
 
-  const visibleFields = template.fields.filter((f) => isVisible(f.showIfFieldId, f.showIfValue, answers));
+  const visibleFields = visibleFieldsFor(template.fields, answers);
 
   function setValue(fieldId: string, value: unknown) {
     setAnswers((prev) => ({ ...prev, [fieldId]: value }));
-    setError(null);
-  }
-
-  function toggleMulti(fieldId: string, option: string) {
-    setAnswers((prev) => {
-      const current = Array.isArray(prev[fieldId]) ? (prev[fieldId] as string[]) : [];
-      const next = current.includes(option) ? current.filter((o) => o !== option) : [...current, option];
-      return { ...prev, [fieldId]: next };
-    });
     setError(null);
   }
 
@@ -139,90 +119,14 @@ export function FormRunner({ template, assetId, assetName, operatorId, operatorN
         </button>
       )}
 
-      {visibleFields.map((field) => (
-        <div key={field.id} className="rounded-2xl border border-(--border-subtle) bg-(--surface-1) p-4">
-          <p className="text-lg font-semibold">
-            {field.label}
-            {field.required && <span className="text-danger-500"> *</span>}
-          </p>
-
-          {field.type === 'text' && (
-            <input
-              type="text"
-              className="mt-3 min-h-14 w-full rounded-xl border border-(--border-subtle) bg-(--surface-0) px-4 text-base"
-              value={(answers[field.id] as string) ?? ''}
-              onChange={(e) => setValue(field.id, e.target.value)}
-            />
-          )}
-
-          {field.type === 'number' && (
-            <input
-              type="number"
-              className="mt-3 min-h-14 w-full rounded-xl border border-(--border-subtle) bg-(--surface-0) px-4 text-base"
-              value={(answers[field.id] as number | undefined) ?? ''}
-              onChange={(e) => setValue(field.id, e.target.value === '' ? undefined : Number(e.target.value))}
-            />
-          )}
-
-          {field.type === 'date' && (
-            <input
-              type="date"
-              className="mt-3 min-h-14 w-full rounded-xl border border-(--border-subtle) bg-(--surface-0) px-4 text-base"
-              value={(answers[field.id] as string) ?? ''}
-              onChange={(e) => setValue(field.id, e.target.value)}
-            />
-          )}
-
-          {field.type === 'single_select' && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {(field.options ?? []).map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => setValue(field.id, option)}
-                  className={`min-h-12 rounded-xl px-4 text-base font-medium transition-colors ${
-                    answers[field.id] === option ? 'bg-accent-600 text-white' : 'bg-(--surface-2) text-(--text-secondary)'
-                  }`}
-                >
-                  {option}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {field.type === 'multi_select' && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {(field.options ?? []).map((option) => {
-                const selected = Array.isArray(answers[field.id]) && (answers[field.id] as string[]).includes(option);
-                return (
-                  <button
-                    key={option}
-                    type="button"
-                    onClick={() => toggleMulti(field.id, option)}
-                    className={`min-h-12 rounded-xl px-4 text-base font-medium transition-colors ${
-                      selected ? 'bg-accent-600 text-white' : 'bg-(--surface-2) text-(--text-secondary)'
-                    }`}
-                  >
-                    {option}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {field.type === 'asset_ref' && (
-            <p className="mt-3 text-base text-(--text-secondary)">
-              {assetName ? `Vehicle: ${assetName}` : 'Open this form from your current job to fill this in.'}
-            </p>
-          )}
-
-          {field.type === 'operator_ref' && (
-            <p className="mt-3 text-base text-(--text-secondary)">
-              {operatorName ? `You — ${operatorName}` : 'Not available.'}
-            </p>
-          )}
-        </div>
-      ))}
+      <FormFields
+        fields={visibleFields}
+        answers={answers}
+        onChange={setValue}
+        assetId={assetId}
+        assetName={assetName}
+        operatorName={operatorName}
+      />
 
       {error && <p className="text-danger-500">{error}</p>}
       <Button onClick={handleSubmit} disabled={isSubmitting}>

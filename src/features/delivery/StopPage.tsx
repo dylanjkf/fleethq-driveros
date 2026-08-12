@@ -1,18 +1,20 @@
 import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { applyStopOutcome, cacheStopOutcome, completeStop, type TodayJobs } from '@/api/jobs';
+import { getActiveDeliveryFormTemplate } from '@/api/forms';
 import { getStopParcels, type Parcel } from '@/api/parcels';
 import { submitScannedReference } from './scan-submit';
 import { scanBarcodeWithCamera } from '@/lib/barcode-scanner';
 import { Button } from '@/components/ui/Button';
 import { StatusBar } from '@/components/ui/StatusBar';
 import { SignaturePad } from '@/components/ui/SignaturePad';
+import { FormFields, isEmptyValue, visibleFieldsFor } from '@/features/forms/FormFields';
 import { ApiClientError } from '@/api/client';
 import { OutboxQuotaError } from '@/lib/offline-db';
 import { compressImageFile, MAX_PHOTO_BYTES } from '@/lib/image';
 import { directionsUrl } from '@/lib/maps';
-import type { StopFailureReason, StopOutcome } from '@/api/types';
+import type { FormAnswer, StopFailureReason, StopOutcome } from '@/api/types';
 
 type Outcome = Exclude<StopOutcome, 'PENDING'>;
 
@@ -48,9 +50,20 @@ export function StopPage() {
   const [failureReason, setFailureReason] = useState<StopFailureReason | null>(null);
   const [photo, setPhoto] = useState<{ dataUrl: string; contentType: string; filename: string } | null>(null);
   const [signatureDataUrl, setSignatureDataUrl] = useState<string | null>(null);
+  // Answers for the configurable POD evidence form (when a DELIVERY template
+  // is active). Independent of the legacy hardcoded photo/signature state above.
+  const [evidenceAnswers, setEvidenceAnswers] = useState<Record<string, unknown>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<string | null>(null);
+
+  // The tenant's configurable proof-of-delivery evidence set, if configured.
+  // `null`/undefined → fall back to the legacy hardcoded photo + signature.
+  const { data: deliveryTemplate } = useQuery({
+    queryKey: ['delivery-template'],
+    queryFn: getActiveDeliveryFormTemplate,
+    staleTime: 60_000,
+  });
 
   const [parcels, setParcels] = useState<Parcel[]>([]);
   const [scanInput, setScanInput] = useState('');
@@ -121,12 +134,44 @@ export function StopPage() {
     }
   }
 
+  // The POD evidence form's currently-visible fields (empty when no template).
+  const evidenceFields = deliveryTemplate ? visibleFieldsFor(deliveryTemplate.fields, evidenceAnswers) : [];
+  // Every parcel at the stop rides on this completion (multi-drop: one shared
+  // capture covers them all — the common 1–3 parcel case). Omitting parcelIds
+  // would mean the same thing server-side; we send them explicitly.
+  const parcelIds = parcels.length > 0 ? parcels.map((p) => p.id) : undefined;
+
+  function setEvidenceValue(fieldId: string, value: unknown) {
+    setEvidenceAnswers((prev) => ({ ...prev, [fieldId]: value }));
+    setError(null);
+  }
+
   async function submit() {
     if (!jobId || !stopId || !outcome) return;
     if (outcome === 'FAILED' && !note.trim()) {
       setError('Add a note explaining why the delivery failed.');
       return;
     }
+
+    // Configurable POD: when a DELIVERY template is active, a DELIVERED drop
+    // captures its evidence instead of the hardcoded photo/signature. Enforce
+    // required fields client-side (the server is the real gate).
+    let evidence: { id: string; answers: FormAnswer[] } | undefined;
+    if (deliveryTemplate && outcome === 'DELIVERED') {
+      for (const field of evidenceFields) {
+        if (field.required && isEmptyValue(evidenceAnswers[field.id])) {
+          setError(`Capture "${field.label}" before saving this delivery.`);
+          return;
+        }
+      }
+      evidence = {
+        id: crypto.randomUUID(),
+        answers: evidenceFields
+          .filter((f) => !isEmptyValue(evidenceAnswers[f.id]))
+          .map((f) => ({ fieldId: f.id, value: evidenceAnswers[f.id] })),
+      };
+    }
+
     setError(null);
     setSubmitting(true);
     try {
@@ -137,12 +182,20 @@ export function StopPage() {
         failureReason: outcome === 'FAILED' ? (failureReason ?? undefined) : undefined,
         // Stamped now so an offline delivery keeps its real time, not sync time.
         occurredAt: new Date().toISOString(),
-        podPhotoBase64: photo?.dataUrl,
-        podPhotoContentType: photo?.contentType,
-        podPhotoFilename: photo?.filename,
-        signatureBase64: signatureDataUrl ?? undefined,
-        signatureContentType: signatureDataUrl ? 'image/png' : undefined,
-        signatureFilename: signatureDataUrl ? 'signature.png' : undefined,
+        // Legacy hardcoded POD only when NO configurable template is set — the
+        // backend still supports this path for backward compatibility.
+        ...(deliveryTemplate
+          ? {}
+          : {
+              podPhotoBase64: photo?.dataUrl,
+              podPhotoContentType: photo?.contentType,
+              podPhotoFilename: photo?.filename,
+              signatureBase64: signatureDataUrl ?? undefined,
+              signatureContentType: signatureDataUrl ? 'image/png' : undefined,
+              signatureFilename: signatureDataUrl ? 'signature.png' : undefined,
+            }),
+        ...(parcelIds ? { parcelIds } : {}),
+        ...(evidence ? { evidence } : {}),
       });
       // Reflect the completed stop everywhere the driver might see it next,
       // *including offline* where a refetch can't: update the live query data and
@@ -299,25 +352,47 @@ export function StopPage() {
             onChange={(e) => setNote(e.target.value)}
           />
 
-          <label className="block">
-            <span className="mb-2 block text-sm text-(--text-tertiary)">Proof photo (optional)</span>
-            {photo ? (
-              <div className="relative">
-                <img src={photo.dataUrl} alt="Proof of delivery" className="w-full rounded-2xl border border-(--border-subtle)" />
-                <button type="button" onClick={() => setPhoto(null)} className="absolute right-2 top-2 rounded-full bg-(--surface-0)/80 px-3 py-1 text-sm">Retake</button>
+          {deliveryTemplate ? (
+            // Configurable proof-of-delivery: capture the tenant's DELIVERY
+            // template evidence on a delivered drop (one shared capture covers
+            // every parcel at the stop). Nothing extra to capture on a failure.
+            outcome === 'DELIVERED' && (
+              <div className="space-y-4">
+                <div>
+                  <span className="block text-sm font-semibold">Delivery evidence</span>
+                  {deliveryTemplate.description && (
+                    <span className="block text-sm text-(--text-tertiary)">{deliveryTemplate.description}</span>
+                  )}
+                  {parcels.length > 1 && (
+                    <span className="block text-sm text-(--text-tertiary)">Covers all {parcels.length} parcels at this stop.</span>
+                  )}
+                </div>
+                <FormFields fields={evidenceFields} answers={evidenceAnswers} onChange={setEvidenceValue} assetName={null} operatorName={null} />
               </div>
-            ) : (
-              <span className="flex min-h-14 items-center justify-center rounded-2xl border border-dashed border-(--border-subtle) bg-(--surface-1) text-(--text-secondary)">
-                Tap to take a photo
-              </span>
-            )}
-            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => void onPickPhoto(e)} />
-          </label>
+            )
+          ) : (
+            <>
+              <label className="block">
+                <span className="mb-2 block text-sm text-(--text-tertiary)">Proof photo (optional)</span>
+                {photo ? (
+                  <div className="relative">
+                    <img src={photo.dataUrl} alt="Proof of delivery" className="w-full rounded-2xl border border-(--border-subtle)" />
+                    <button type="button" onClick={() => setPhoto(null)} className="absolute right-2 top-2 rounded-full bg-(--surface-0)/80 px-3 py-1 text-sm">Retake</button>
+                  </div>
+                ) : (
+                  <span className="flex min-h-14 items-center justify-center rounded-2xl border border-dashed border-(--border-subtle) bg-(--surface-1) text-(--text-secondary)">
+                    Tap to take a photo
+                  </span>
+                )}
+                <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => void onPickPhoto(e)} />
+              </label>
 
-          <div>
-            <span className="mb-2 block text-sm text-(--text-tertiary)">Recipient signature (optional)</span>
-            <SignaturePad onChange={setSignatureDataUrl} />
-          </div>
+              <div>
+                <span className="mb-2 block text-sm text-(--text-tertiary)">Recipient signature (optional)</span>
+                <SignaturePad onChange={setSignatureDataUrl} />
+              </div>
+            </>
+          )}
 
           {error && <p className="text-danger-500">{error}</p>}
           <Button onClick={submit} disabled={!outcome || submitting}>
