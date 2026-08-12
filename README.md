@@ -46,9 +46,11 @@ npm run app:ios      # app:sync, then open the Xcode project (needs macOS + Xcod
 npm run app:android  # app:sync, then open the Android Studio project
 ```
 
-**What's done**: the native projects exist, build-configured, and sync
-correctly with the web build (verified in CI — see
-`.github/workflows/ci.yml`).
+**What's done**: the native projects exist and are build-configured against
+this app's `dist/` build. CI (`.github/workflows/ci.yml`) verifies the web app
+only — it runs lint, the TypeScript typecheck + Vite build, and the unit tests.
+It does NOT run `cap sync` or any native (iOS/Android) build, so the Capacitor
+sync step is a manual/local one (`npm run app:sync`), not something CI checks.
 
 **What still needs a human with the right toolchain** — none of this can be
 done from a Linux CI/sandbox environment:
