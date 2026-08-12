@@ -66,6 +66,9 @@ export interface Job {
   scheduledAt: string | null;
   completedAt: string | null;
   cancelledAt: string | null;
+  /** Set once the driver has verified the vehicle's load against the manifest
+   *  before starting (item 2). Null until then. */
+  loadVerifiedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   /**
@@ -120,7 +123,24 @@ export interface ChecklistAnswer {
   note?: string;
 }
 
-export type FormFieldType = 'text' | 'number' | 'single_select' | 'multi_select' | 'date' | 'asset_ref' | 'operator_ref';
+export type FormFieldType =
+  | 'text'
+  | 'number'
+  | 'single_select'
+  | 'multi_select'
+  | 'date'
+  | 'asset_ref'
+  | 'operator_ref'
+  | 'photo'
+  | 'signature';
+
+/** A captured photo/signature answer value. Stored server-side as an attachment. */
+export interface AttachmentAnswerValue {
+  contentType: string;
+  filename: string;
+  /** Bare base64 payload (no `data:` prefix). */
+  base64: string;
+}
 
 export interface FormField {
   id: string;
@@ -132,7 +152,7 @@ export interface FormField {
   showIfValue: string | null;
 }
 
-export type FormTargetContext = 'DRIVER' | 'OFFICE' | 'BOTH';
+export type FormTargetContext = 'DRIVER' | 'OFFICE' | 'BOTH' | 'DELIVERY';
 
 export interface FormTemplate {
   id: string;

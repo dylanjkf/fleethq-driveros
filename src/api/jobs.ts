@@ -1,7 +1,7 @@
 import { apiClient } from './client';
 import { getCache, setCache } from '@/lib/offline-db';
 import { postOrQueue } from '@/lib/offline-post';
-import type { Job, Paginated, StopFailureReason, StopOutcome } from './types';
+import type { FormAnswer, Job, Paginated, StopFailureReason, StopOutcome } from './types';
 
 const TODAY_CACHE_KEY = 'today-jobs';
 
@@ -86,6 +86,21 @@ export interface CompleteStopInput {
   signatureBase64?: string;
   signatureContentType?: string;
   signatureFilename?: string;
+  /**
+   * Multi-drop: the specific parcels this completion covers. Omitted = every
+   * parcel at the stop. Sent when the driver confirms a subset (or, in this
+   * slice, one shared evidence capture covering all parcels at the stop).
+   */
+  parcelIds?: string[];
+  /**
+   * Configurable proof-of-delivery evidence, when the tenant has an active
+   * DELIVERY form template. `answers` carries that template's field answers,
+   * including `photo`/`signature` values as `{ contentType, filename, base64 }`.
+   * The client-generated `id` makes an offline replay idempotent. Required by
+   * the server iff a DELIVERY template is active (else 400 POD_EVIDENCE_REQUIRED);
+   * omitted here on the legacy hardcoded photo/signature path.
+   */
+  evidence?: { id?: string; answers: FormAnswer[] };
 }
 
 /**

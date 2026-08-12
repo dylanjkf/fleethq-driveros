@@ -4,6 +4,7 @@ import { postOrQueue } from '@/lib/offline-post';
 import type { FormAnswer, FormField, FormTemplate, Paginated } from './types';
 
 const TEMPLATES_CACHE_KEY = 'form-templates-driver';
+const DELIVERY_TEMPLATE_CACHE_KEY = 'form-template-delivery';
 
 export interface ApplicableFormTemplates {
   items: FormTemplate[];
@@ -28,6 +29,30 @@ export async function getApplicableFormTemplates(): Promise<ApplicableFormTempla
     if (cached) {
       return { items: cached.data, fromCache: true, cachedAt: cached.cachedAt };
     }
+    throw err;
+  }
+}
+
+/**
+ * The tenant's active delivery-confirmation (POD) evidence template, if any —
+ * a form template with `targetContext: DELIVERY`. Returns `null` when the
+ * company hasn't configured one (the legacy hardcoded photo/signature path then
+ * applies). Network-first with the same offline cache fallback as the other
+ * template fetches, so a driver who saw it this shift can still capture in a
+ * dead zone. At most one active DELIVERY template exists per company, so the
+ * first item is authoritative.
+ */
+export async function getActiveDeliveryFormTemplate(): Promise<FormTemplate | null> {
+  try {
+    const { data } = await apiClient.get<Paginated<FormTemplate>>('/v1/form-templates', {
+      params: { targetContext: 'DELIVERY', pageSize: 1 },
+    });
+    const template = data.items[0] ?? null;
+    await setCache(DELIVERY_TEMPLATE_CACHE_KEY, template);
+    return template;
+  } catch (err) {
+    const cached = await getCache<FormTemplate | null>(DELIVERY_TEMPLATE_CACHE_KEY);
+    if (cached) return cached.data;
     throw err;
   }
 }

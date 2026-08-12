@@ -68,6 +68,49 @@ done from a Linux CI/sandbox environment:
 See `fleethq-platform`'s `FleetOS-Playbook/04-DriverOS/App_Packaging.md` for
 the full packaging and store-submission checklist.
 
+## Camera barcode/QR scanning
+
+The stop screen (`src/features/delivery/StopPage.tsx`) scans parcels three ways
+that all funnel through the **one** server-side matching path
+(`scanStopParcel` → `POST …/parcels/scan`, offline-capable via `postOrQueue`):
+
+- the manual text input (HID/Bluetooth scanner, or typed by hand) — **always
+  available**, never hidden behind an error;
+- a **"Scan with camera"** button using the native ML Kit scanner.
+
+Both entry points call `submitScannedReference` (`src/features/delivery/
+scan-submit.ts`); there is no second matching path. The camera wrapper is
+`src/lib/barcode-scanner.ts`.
+
+**Plugin choice:** `@capacitor-mlkit/barcode-scanning@8.1.0` (native), chosen
+over a web `BarcodeDetector`-in-webview fallback because it publishes a
+Capacitor-8-compatible release (peer `@capacitor/core >=8.0.0`; we run 8.4.2)
+and the native ML Kit scanner decodes far better on real devices. Requires
+`npx cap sync` before a device build (adds the plugin to the iOS/Android
+projects). Camera permission strings are already declared (iOS
+`NSCameraUsageDescription`, Android `android.permission.CAMERA`). On Android the
+ML Kit scanner module is fetched on-demand by Play services on first scan. On
+the plain web build (dev in a browser, no native shell) the button reports
+"needs the installed app" and manual entry stays the path.
+
+**Manual device-test procedure** (camera can't be unit-tested in CI — no
+device):
+
+1. `npm run app:sync` (or `npm run app:ios` / `npm run app:android`), build to a
+   real device, open a stop from Today.
+2. Tap **Scan with camera**, accept the camera permission prompt, point at a
+   parcel barcode/QR → it appears in the Parcels list as "✓ Scanned" and the
+   `x/y scanned` counter increments (same result as typing the code).
+3. **Permission denied:** delete/deny camera access in OS settings, tap the
+   button → "Camera access is off…" message shows and the manual input still
+   works.
+4. **No-read:** point at a blank/poorly-lit surface and back out → "Couldn't
+   read a barcode…" (or nothing on cancel); manual entry unaffected.
+5. **Unknown code:** scan a barcode not on the manifest → it goes through
+   `scanStopParcel`; the server's response governs (unknown refs handled there).
+6. **Offline:** enable airplane mode, scan → parcel shows optimistically and the
+   scan queues to the outbox (`{ queued: true }`), replaying on reconnect.
+
 ## Release versioning
 
 `package.json` `version` is the single source of truth for the marketing

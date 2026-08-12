@@ -9,6 +9,7 @@ import { ChecklistPage } from '@/features/checklist/ChecklistPage';
 import { FormsPage } from '@/features/forms/FormsPage';
 import { MessagesPage } from '@/features/messages/MessagesPage';
 import { StopPage } from '@/features/delivery/StopPage';
+import { ConfirmLoadPage } from '@/features/delivery/ConfirmLoadPage';
 import { NotificationsPage } from '@/features/notifications/NotificationsPage';
 import { HelpPage } from '@/features/help/HelpPage';
 import { NotFoundPage } from '@/features/shared/NotFoundPage';
@@ -26,6 +27,7 @@ export const router = createBrowserRouter([
       { path: '/forms', element: <FormsPage /> },
       { path: '/messages', element: <MessagesPage /> },
       { path: '/stop', element: <StopPage /> },
+      { path: '/confirm-load', element: <ConfirmLoadPage /> },
       { path: '/notifications', element: <NotificationsPage /> },
       { path: '/help', element: <HelpPage /> },
       { path: '*', element: <NotFoundPage /> },

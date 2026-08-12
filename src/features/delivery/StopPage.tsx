@@ -1,16 +1,20 @@
 import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { applyStopOutcome, cacheStopOutcome, completeStop, type TodayJobs } from '@/api/jobs';
-import { getStopParcels, scanStopParcel, type Parcel } from '@/api/parcels';
+import { getActiveDeliveryFormTemplate } from '@/api/forms';
+import { getStopParcels, type Parcel } from '@/api/parcels';
+import { submitScannedReference } from './scan-submit';
+import { scanBarcodeWithCamera } from '@/lib/barcode-scanner';
 import { Button } from '@/components/ui/Button';
 import { StatusBar } from '@/components/ui/StatusBar';
 import { SignaturePad } from '@/components/ui/SignaturePad';
+import { FormFields, isEmptyValue, visibleFieldsFor } from '@/features/forms/FormFields';
 import { ApiClientError } from '@/api/client';
 import { OutboxQuotaError } from '@/lib/offline-db';
 import { compressImageFile, MAX_PHOTO_BYTES } from '@/lib/image';
 import { directionsUrl } from '@/lib/maps';
-import type { StopFailureReason, StopOutcome } from '@/api/types';
+import type { FormAnswer, StopFailureReason, StopOutcome } from '@/api/types';
 
 type Outcome = Exclude<StopOutcome, 'PENDING'>;
 
@@ -46,13 +50,28 @@ export function StopPage() {
   const [failureReason, setFailureReason] = useState<StopFailureReason | null>(null);
   const [photo, setPhoto] = useState<{ dataUrl: string; contentType: string; filename: string } | null>(null);
   const [signatureDataUrl, setSignatureDataUrl] = useState<string | null>(null);
+  // Answers for the configurable POD evidence form (when a DELIVERY template
+  // is active). Independent of the legacy hardcoded photo/signature state above.
+  const [evidenceAnswers, setEvidenceAnswers] = useState<Record<string, unknown>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<string | null>(null);
 
+  // The tenant's configurable proof-of-delivery evidence set, if configured.
+  // `null`/undefined → fall back to the legacy hardcoded photo + signature.
+  const { data: deliveryTemplate } = useQuery({
+    queryKey: ['delivery-template'],
+    queryFn: getActiveDeliveryFormTemplate,
+    staleTime: 60_000,
+  });
+
   const [parcels, setParcels] = useState<Parcel[]>([]);
   const [scanInput, setScanInput] = useState('');
   const [scanning, setScanning] = useState(false);
+  // Non-blocking status for the camera scanner (permission denied, no-read,
+  // etc.). Kept separate from `error` so it shows next to the scan controls
+  // without disturbing the delivery form — manual entry stays available.
+  const [scanMessage, setScanMessage] = useState<string | null>(null);
 
   // Load any parcels the office pre-listed for this stop. Best-effort: offline
   // (or a stop with no parcels) simply shows the section empty — parcels are an
@@ -70,33 +89,30 @@ export function StopPage() {
 
   const scannedCount = parcels.filter((p) => p.scannedAt).length;
 
+  // Resolve any raw scanned string — from the manual input OR the camera —
+  // through the ONE shared matching path (see scan-submit.ts / scanStopParcel).
+  async function resolveScan(raw: string) {
+    if (!jobId || !stopId) return;
+    await submitScannedReference(raw, { jobId, stopId, setParcels, setScanning, setError });
+  }
+
   async function onScan(e: FormEvent) {
     e.preventDefault();
-    const reference = scanInput.trim();
-    if (!reference || !jobId || !stopId) return;
-    setScanning(true);
-    // Optimistic: reflect the scan immediately so a fast scanner keeps up.
-    setParcels((prev) => {
-      const existing = prev.find((p) => p.reference === reference);
-      if (existing) return prev.map((p) => (p.reference === reference ? { ...p, scannedAt: p.scannedAt ?? new Date().toISOString() } : p));
-      return [...prev, { id: `local-${reference}`, reference, label: null, scannedAt: new Date().toISOString() }];
-    });
+    const raw = scanInput;
     setScanInput('');
-    try {
-      const { queued } = await scanStopParcel(jobId, stopId, reference);
-      // When it reached the server, reconcile with the authoritative list.
-      if (!queued) {
-        const res = await getStopParcels(jobId, stopId);
-        setParcels(res.parcels);
-      }
-    } catch (err) {
-      // A quota failure means the scan was NOT queued — surface it so the driver
-      // knows the outbox is full, rather than swallowing it silently. Other
-      // errors leave the optimistic state; the outbox or a later reload fixes it.
-      if (err instanceof OutboxQuotaError) setError(err.message);
-    } finally {
-      setScanning(false);
+    await resolveScan(raw);
+  }
+
+  async function onCameraScan() {
+    setScanMessage(null);
+    const result = await scanBarcodeWithCamera();
+    if (result.ok) {
+      await resolveScan(result.value);
+    } else if (result.message) {
+      // permission / unsupported / no-read: tell the driver, keep manual entry.
+      setScanMessage(result.message);
     }
+    // 'cancelled' (empty message) → driver backed out; say nothing.
   }
 
   async function onPickPhoto(e: ChangeEvent<HTMLInputElement>) {
@@ -118,12 +134,44 @@ export function StopPage() {
     }
   }
 
+  // The POD evidence form's currently-visible fields (empty when no template).
+  const evidenceFields = deliveryTemplate ? visibleFieldsFor(deliveryTemplate.fields, evidenceAnswers) : [];
+  // Every parcel at the stop rides on this completion (multi-drop: one shared
+  // capture covers them all — the common 1–3 parcel case). Omitting parcelIds
+  // would mean the same thing server-side; we send them explicitly.
+  const parcelIds = parcels.length > 0 ? parcels.map((p) => p.id) : undefined;
+
+  function setEvidenceValue(fieldId: string, value: unknown) {
+    setEvidenceAnswers((prev) => ({ ...prev, [fieldId]: value }));
+    setError(null);
+  }
+
   async function submit() {
     if (!jobId || !stopId || !outcome) return;
     if (outcome === 'FAILED' && !note.trim()) {
       setError('Add a note explaining why the delivery failed.');
       return;
     }
+
+    // Configurable POD: when a DELIVERY template is active, a DELIVERED drop
+    // captures its evidence instead of the hardcoded photo/signature. Enforce
+    // required fields client-side (the server is the real gate).
+    let evidence: { id: string; answers: FormAnswer[] } | undefined;
+    if (deliveryTemplate && outcome === 'DELIVERED') {
+      for (const field of evidenceFields) {
+        if (field.required && isEmptyValue(evidenceAnswers[field.id])) {
+          setError(`Capture "${field.label}" before saving this delivery.`);
+          return;
+        }
+      }
+      evidence = {
+        id: crypto.randomUUID(),
+        answers: evidenceFields
+          .filter((f) => !isEmptyValue(evidenceAnswers[f.id]))
+          .map((f) => ({ fieldId: f.id, value: evidenceAnswers[f.id] })),
+      };
+    }
+
     setError(null);
     setSubmitting(true);
     try {
@@ -134,12 +182,20 @@ export function StopPage() {
         failureReason: outcome === 'FAILED' ? (failureReason ?? undefined) : undefined,
         // Stamped now so an offline delivery keeps its real time, not sync time.
         occurredAt: new Date().toISOString(),
-        podPhotoBase64: photo?.dataUrl,
-        podPhotoContentType: photo?.contentType,
-        podPhotoFilename: photo?.filename,
-        signatureBase64: signatureDataUrl ?? undefined,
-        signatureContentType: signatureDataUrl ? 'image/png' : undefined,
-        signatureFilename: signatureDataUrl ? 'signature.png' : undefined,
+        // Legacy hardcoded POD only when NO configurable template is set — the
+        // backend still supports this path for backward compatibility.
+        ...(deliveryTemplate
+          ? {}
+          : {
+              podPhotoBase64: photo?.dataUrl,
+              podPhotoContentType: photo?.contentType,
+              podPhotoFilename: photo?.filename,
+              signatureBase64: signatureDataUrl ?? undefined,
+              signatureContentType: signatureDataUrl ? 'image/png' : undefined,
+              signatureFilename: signatureDataUrl ? 'signature.png' : undefined,
+            }),
+        ...(parcelIds ? { parcelIds } : {}),
+        ...(evidence ? { evidence } : {}),
       });
       // Reflect the completed stop everywhere the driver might see it next,
       // *including offline* where a refetch can't: update the live query data and
@@ -223,19 +279,33 @@ export function StopPage() {
             </div>
           )}
 
-          <form onSubmit={onScan} className="flex gap-2">
-            <input
-              className="min-h-14 flex-1 rounded-2xl border border-(--border-subtle) bg-(--surface-1) px-4 text-lg"
-              placeholder="Scan or enter parcel barcode"
-              value={scanInput}
-              onChange={(e) => setScanInput(e.target.value)}
-              autoComplete="off"
-              inputMode="text"
-            />
-            <button type="submit" disabled={scanning || !scanInput.trim()} className="min-h-14 rounded-2xl bg-accent-600 px-5 text-sm font-semibold text-white disabled:opacity-50">
-              {scanning ? '…' : 'Scan'}
+          <div className="space-y-2">
+            {/* Manual entry — HID/Bluetooth scanner or typed by hand. ALWAYS
+                available, never hidden behind an error state. */}
+            <form onSubmit={onScan} className="flex gap-2">
+              <input
+                className="min-h-14 flex-1 rounded-2xl border border-(--border-subtle) bg-(--surface-1) px-4 text-lg"
+                placeholder="Scan or enter parcel barcode"
+                value={scanInput}
+                onChange={(e) => setScanInput(e.target.value)}
+                autoComplete="off"
+                inputMode="text"
+              />
+              <button type="submit" disabled={scanning || !scanInput.trim()} className="min-h-14 rounded-2xl bg-accent-600 px-5 text-sm font-semibold text-white disabled:opacity-50">
+                {scanning ? '…' : 'Scan'}
+              </button>
+            </form>
+            {/* Camera scan — same matching path as the manual input above. */}
+            <button
+              type="button"
+              onClick={() => void onCameraScan()}
+              disabled={scanning}
+              className="flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl border border-accent-500/40 bg-accent-500/5 text-sm font-semibold text-accent-500 disabled:opacity-50"
+            >
+              Scan with camera
             </button>
-          </form>
+            {scanMessage && <p className="text-sm text-(--text-tertiary)">{scanMessage}</p>}
+          </div>
 
           <div className="flex gap-3">
             <button
@@ -282,25 +352,47 @@ export function StopPage() {
             onChange={(e) => setNote(e.target.value)}
           />
 
-          <label className="block">
-            <span className="mb-2 block text-sm text-(--text-tertiary)">Proof photo (optional)</span>
-            {photo ? (
-              <div className="relative">
-                <img src={photo.dataUrl} alt="Proof of delivery" className="w-full rounded-2xl border border-(--border-subtle)" />
-                <button type="button" onClick={() => setPhoto(null)} className="absolute right-2 top-2 rounded-full bg-(--surface-0)/80 px-3 py-1 text-sm">Retake</button>
+          {deliveryTemplate ? (
+            // Configurable proof-of-delivery: capture the tenant's DELIVERY
+            // template evidence on a delivered drop (one shared capture covers
+            // every parcel at the stop). Nothing extra to capture on a failure.
+            outcome === 'DELIVERED' && (
+              <div className="space-y-4">
+                <div>
+                  <span className="block text-sm font-semibold">Delivery evidence</span>
+                  {deliveryTemplate.description && (
+                    <span className="block text-sm text-(--text-tertiary)">{deliveryTemplate.description}</span>
+                  )}
+                  {parcels.length > 1 && (
+                    <span className="block text-sm text-(--text-tertiary)">Covers all {parcels.length} parcels at this stop.</span>
+                  )}
+                </div>
+                <FormFields fields={evidenceFields} answers={evidenceAnswers} onChange={setEvidenceValue} assetName={null} operatorName={null} />
               </div>
-            ) : (
-              <span className="flex min-h-14 items-center justify-center rounded-2xl border border-dashed border-(--border-subtle) bg-(--surface-1) text-(--text-secondary)">
-                Tap to take a photo
-              </span>
-            )}
-            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => void onPickPhoto(e)} />
-          </label>
+            )
+          ) : (
+            <>
+              <label className="block">
+                <span className="mb-2 block text-sm text-(--text-tertiary)">Proof photo (optional)</span>
+                {photo ? (
+                  <div className="relative">
+                    <img src={photo.dataUrl} alt="Proof of delivery" className="w-full rounded-2xl border border-(--border-subtle)" />
+                    <button type="button" onClick={() => setPhoto(null)} className="absolute right-2 top-2 rounded-full bg-(--surface-0)/80 px-3 py-1 text-sm">Retake</button>
+                  </div>
+                ) : (
+                  <span className="flex min-h-14 items-center justify-center rounded-2xl border border-dashed border-(--border-subtle) bg-(--surface-1) text-(--text-secondary)">
+                    Tap to take a photo
+                  </span>
+                )}
+                <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => void onPickPhoto(e)} />
+              </label>
 
-          <div>
-            <span className="mb-2 block text-sm text-(--text-tertiary)">Recipient signature (optional)</span>
-            <SignaturePad onChange={setSignatureDataUrl} />
-          </div>
+              <div>
+                <span className="mb-2 block text-sm text-(--text-tertiary)">Recipient signature (optional)</span>
+                <SignaturePad onChange={setSignatureDataUrl} />
+              </div>
+            </>
+          )}
 
           {error && <p className="text-danger-500">{error}</p>}
           <Button onClick={submit} disabled={!outcome || submitting}>
