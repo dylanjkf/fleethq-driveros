@@ -279,6 +279,26 @@ export function TodayPage() {
 
               {job.stops && job.stops.length > 0 && (
                 <div className="mt-4 space-y-2">
+                  {/* Confirm the vehicle's load against the manifest before the run
+                      starts (item 2). Once verified, it reads as done. */}
+                  <button
+                    onClick={() => navigate(`/confirm-load?jobId=${job.id}&title=${encodeURIComponent(job.title)}`)}
+                    className={`flex w-full items-center justify-between rounded-2xl border p-4 text-left ${
+                      job.loadVerifiedAt
+                        ? 'border-success-500/40 bg-success-500/10'
+                        : 'border-warning-500/40 bg-warning-500/10'
+                    }`}
+                  >
+                    <span>
+                      <span className="block text-xs font-semibold uppercase tracking-wide text-(--text-tertiary)">Load</span>
+                      <span className="block font-semibold">
+                        {job.loadVerifiedAt ? 'Load verified' : 'Confirm load before you start'}
+                      </span>
+                    </span>
+                    <span className={`text-sm font-semibold ${job.loadVerifiedAt ? 'text-success-500' : 'text-warning-500'}`}>
+                      {job.loadVerifiedAt ? '✓' : 'Confirm →'}
+                    </span>
+                  </button>
                   {(() => {
                     const nextStop = job.stops!.find((s) => s.outcome === 'PENDING');
                     if (!nextStop) return null;

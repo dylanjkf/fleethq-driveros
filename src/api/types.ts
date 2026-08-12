@@ -66,6 +66,9 @@ export interface Job {
   scheduledAt: string | null;
   completedAt: string | null;
   cancelledAt: string | null;
+  /** Set once the driver has verified the vehicle's load against the manifest
+   *  before starting (item 2). Null until then. */
+  loadVerifiedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   /**
