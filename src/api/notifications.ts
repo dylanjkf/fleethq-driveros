@@ -1,6 +1,6 @@
-import { apiClient, ApiClientError } from './client';
-import { getCache, setCache, queueMutation } from '@/lib/offline-db';
-import { drainOutbox } from '@/lib/sync-engine';
+import { apiClient } from './client';
+import { getCache, setCache } from '@/lib/offline-db';
+import { postOrQueue } from '@/lib/offline-post';
 
 export interface AppNotification {
   id: string;
@@ -61,21 +61,4 @@ async function applyReadToCache(update: (n: AppNotification) => AppNotification)
   if (!cached) return;
   const items = cached.data.items.map(update);
   await setCache(CACHE_KEY, { items, unreadCount: items.filter((n) => !n.readAt).length });
-}
-
-async function postOrQueue(url: string): Promise<void> {
-  if (!navigator.onLine) {
-    await queueMutation({ method: 'POST', url, body: {} });
-    return;
-  }
-  try {
-    await apiClient.post(url);
-  } catch (err) {
-    if (err instanceof ApiClientError && err.status === 0) {
-      await queueMutation({ method: 'POST', url, body: {} });
-      void drainOutbox();
-      return;
-    }
-    throw err;
-  }
 }

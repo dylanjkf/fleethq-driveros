@@ -1,6 +1,6 @@
-import { apiClient, ApiClientError } from './client';
-import { getCache, setCache, queueMutation } from '@/lib/offline-db';
-import { drainOutbox } from '@/lib/sync-engine';
+import { apiClient } from './client';
+import { getCache, setCache } from '@/lib/offline-db';
+import { postOrQueue } from '@/lib/offline-post';
 import type { FormAnswer, FormField, FormTemplate, Paginated } from './types';
 
 const TEMPLATES_CACHE_KEY = 'form-templates-driver';
@@ -53,21 +53,7 @@ export interface SubmitFormResult {
  * server-side, so a flaky reconnect never double-submits.
  */
 export async function submitForm(input: SubmitFormInput): Promise<SubmitFormResult> {
-  if (!navigator.onLine) {
-    await queueMutation({ method: 'POST', url: '/v1/form-submissions', body: input });
-    return { queued: true };
-  }
-  try {
-    await apiClient.post('/v1/form-submissions', input);
-    return { queued: false };
-  } catch (err) {
-    if (err instanceof ApiClientError && err.status === 0) {
-      await queueMutation({ method: 'POST', url: '/v1/form-submissions', body: input });
-      void drainOutbox();
-      return { queued: true };
-    }
-    throw err;
-  }
+  return postOrQueue('/v1/form-submissions', { body: input });
 }
 
 /**

@@ -1,6 +1,6 @@
-import { apiClient, ApiClientError } from './client';
-import { getCache, setCache, queueMutation } from '@/lib/offline-db';
-import { drainOutbox } from '@/lib/sync-engine';
+import { apiClient } from './client';
+import { getCache, setCache } from '@/lib/offline-db';
+import { postOrQueue } from '@/lib/offline-post';
 import type { ChecklistAnswer, ChecklistItem, ChecklistTemplate, Paginated } from './types';
 
 function templatesCacheKey(assetId: string): string {
@@ -59,19 +59,5 @@ export interface SubmitChecklistResult {
  * create the same checklist (or its auto-created workshop job) twice.
  */
 export async function submitChecklist(input: SubmitChecklistInput): Promise<SubmitChecklistResult> {
-  if (!navigator.onLine) {
-    await queueMutation({ method: 'POST', url: '/v1/checklist-submissions', body: input });
-    return { queued: true };
-  }
-  try {
-    await apiClient.post('/v1/checklist-submissions', input);
-    return { queued: false };
-  } catch (err) {
-    if (err instanceof ApiClientError && err.status === 0) {
-      await queueMutation({ method: 'POST', url: '/v1/checklist-submissions', body: input });
-      void drainOutbox();
-      return { queued: true };
-    }
-    throw err;
-  }
+  return postOrQueue('/v1/checklist-submissions', { body: input });
 }

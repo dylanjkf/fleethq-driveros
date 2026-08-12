@@ -1,6 +1,6 @@
-import { apiClient, ApiClientError } from './client';
-import { getCache, setCache, queueMutation } from '@/lib/offline-db';
-import { drainOutbox } from '@/lib/sync-engine';
+import { apiClient } from './client';
+import { getCache, setCache } from '@/lib/offline-db';
+import { postOrQueue } from '@/lib/offline-post';
 import type { MessageThread } from './types';
 
 const THREAD_CACHE_KEY = 'messages-thread';
@@ -44,19 +44,5 @@ export async function sendMessage(body: string): Promise<SendMessageResult> {
   // Stable idempotency key stamped once so an outbox replay after a lost
   // response can't double-post the same message to the office.
   const payload = { body, clientRequestId: crypto.randomUUID() };
-  if (!navigator.onLine) {
-    await queueMutation({ method: 'POST', url: '/v1/messages', body: payload });
-    return { queued: true };
-  }
-  try {
-    await apiClient.post('/v1/messages', payload);
-    return { queued: false };
-  } catch (err) {
-    if (err instanceof ApiClientError && err.status === 0) {
-      await queueMutation({ method: 'POST', url: '/v1/messages', body: payload });
-      void drainOutbox();
-      return { queued: true };
-    }
-    throw err;
-  }
+  return postOrQueue('/v1/messages', { body: payload });
 }
