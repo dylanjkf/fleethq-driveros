@@ -111,6 +111,38 @@ device):
 6. **Offline:** enable airplane mode, scan → parcel shows optimistically and the
    scan queues to the outbox (`{ queued: true }`), replaying on reconnect.
 
+## Confirm Load (pre-run load verification)
+
+Before starting a run, the driver checks the vehicle's actual load against the
+run's expected manifest (`src/features/delivery/ConfirmLoadPage.tsx`):
+
+- Each expected parcel is scanned or **Mark loaded** — the same shared scan path
+  as delivery (`submitScannedReference`), no second matcher.
+- Any manifest item not yet scanned surfaces as a **discrepancy**; a clean load
+  confirms and starts, while a partial load can only proceed via an explicit
+  **Proceed anyway**, which records the override (who / when / what was missing)
+  on the API (`POST …/load-verification`).
+- **Offline-first:** the manifest and each optimistic scan are cached under
+  `load-status-{jobId}` (`src/api/load.ts`), so a load verified in a dead zone
+  keeps its scanned parcels across an app restart instead of reverting to
+  "missing".
+
+## Proof of delivery (configurable, multi-drop)
+
+The stop screen (`StopPage.tsx`) records delivery for **all parcels at a stop**
+in one capture:
+
+- When the tenant has an active **DELIVERY form template**, a delivered drop
+  captures that template's evidence (photo/signature/fields) instead of the
+  legacy hardcoded photo+signature; every covered parcel is marked delivered
+  under one shared submission (`parcelIds`).
+- A stop can't be silently marked delivered with **unscanned** parcels: each
+  parcel must be scanned/confirmed, or the driver ticks an explicit **Deliver
+  unscanned** override — which the server records (`pod_unconfirmed_override`,
+  who / when / which parcels).
+- The whole completion (evidence base64 included) queues to the outbox when
+  offline and replays on reconnect; the server is idempotent on a replay.
+
 ## Release versioning
 
 `package.json` `version` is the single source of truth for the marketing

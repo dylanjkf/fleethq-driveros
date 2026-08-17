@@ -17,7 +17,10 @@ Everything lives in a single IndexedDB database named `driveros`, managed by
   notes, odometer readings and the last 4 digits of a fuel card.
 - **`cache`** — last-known-good reads shown with an "offline — last synced"
   indicator: today's jobs including **customer names and delivery addresses**,
-  glovebox documents, and checklist templates.
+  glovebox documents, checklist templates, and — keyed `load-status-{jobId}` —
+  each run's Confirm Load manifest and scan state (so a load verified in a dead
+  zone keeps its scanned parcels across an app restart; see `src/api/load.ts` /
+  `ConfirmLoadPage.tsx`).
 - **`checklistDrafts`** — in-progress safety-checklist answers, saved on every
   keystroke so progress survives a mid-flow disconnect.
 - **`deadLetter`** — mutations the server permanently rejected, held out of the
