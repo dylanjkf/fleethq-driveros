@@ -428,8 +428,10 @@ describe('dead-letter — cross-driver ownership (security audit H4)', () => {
     // exposes it via `foreignFailed` (drives the StatusBar banner).
     signInAs('driver-b');
     const state = trackState();
-    await syncEngine.subscribeOutbox(() => {});
-    await new Promise((r) => setTimeout(r, 0));
-    expect(state.last).toMatchObject({ failed: 0, foreignFailed: 1 });
+    syncEngine.subscribeOutbox(() => {}); // force a fresh publish
+    // The publish is an async currentState() read over (fake) IndexedDB, which
+    // can take several ticks — poll for the expected state instead of guessing a
+    // single macrotask tick (a bare setTimeout(r,0) here raced ~1 in 3 runs).
+    await vi.waitFor(() => expect(state.last).toMatchObject({ failed: 0, foreignFailed: 1 }));
   });
 });

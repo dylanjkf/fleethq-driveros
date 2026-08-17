@@ -17,6 +17,8 @@ export interface AuthContextValue {
   isOffline: boolean;
   login: (username: string, password: string) => Promise<LoginResult>;
   selectCompany: (preAuthToken: string, companyId: string) => Promise<LoginResult>;
+  /** Set a new password after a login came back `password_expired`, finishing that login. */
+  changeExpiredPassword: (changeToken: string, newPassword: string) => Promise<LoginResult>;
   logout: () => void;
 }
 
@@ -125,6 +127,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [loadCurrentUser],
   );
 
+  const changeExpiredPassword = useCallback(
+    async (changeToken: string, newPassword: string) => {
+      const result = await authApi.changeExpiredPassword(changeToken, newPassword);
+      if (result.status === 'authenticated') {
+        tokenStore.set(result.accessToken);
+        await loadCurrentUser();
+      }
+      return result;
+    },
+    [loadCurrentUser],
+  );
+
   const logout = useCallback(async () => {
     // Explicit logout on a shared tablet. Order matters:
     //  1. Tear down the push subscription FIRST, while the access token is still
@@ -145,8 +159,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [queryClient]);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ status, user, isOffline, login, selectCompany, logout }),
-    [status, user, isOffline, login, selectCompany, logout],
+    () => ({ status, user, isOffline, login, selectCompany, changeExpiredPassword, logout }),
+    [status, user, isOffline, login, selectCompany, changeExpiredPassword, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

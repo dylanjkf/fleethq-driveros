@@ -106,8 +106,11 @@ export interface CompleteStopInput {
 /**
  * Completes a delivery stop with Proof of Delivery. Offline (or on a network
  * failure) the completion — including its base64 photo — is queued to the outbox
- * and replayed on reconnect; the server dedupes a replayed completion, so a
- * flaky reconnect can't double-record a delivery.
+ * and replayed on reconnect. A replayed (or concurrent double-tap) completion is
+ * idempotent server-side: completeStop runs its check-then-write under
+ * SERIALIZABLE isolation and returns the already-completed stop unchanged (see
+ * job-stops.service.ts), so a flaky reconnect can't double-record a delivery or
+ * duplicate its timeline events/notifications.
  */
 export async function completeStop(
   jobId: string,

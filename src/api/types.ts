@@ -18,9 +18,20 @@ export interface CompanyChoice {
   name: string;
 }
 
+/**
+ * Mirrors the API's own `LoginResult` union (auth.service.ts) exactly. DriverOS
+ * previously declared only the first two, so the other three fell through the
+ * login handler as a malformed `choose_company` and crashed into the error
+ * boundary. DriverOS has no MFA UI, so it surfaces the two MFA statuses as a
+ * clear "not supported on this device" message; `password_expired` it resolves
+ * in-app (see LoginPage).
+ */
 export type LoginResult =
   | { status: 'authenticated'; accessToken: string; company: CompanyChoice }
-  | { status: 'choose_company'; preAuthToken: string; companies: CompanyChoice[] };
+  | { status: 'choose_company'; preAuthToken: string; companies: CompanyChoice[] }
+  | { status: 'mfa_required'; mfaToken: string }
+  | { status: 'mfa_setup_required'; setupToken: string }
+  | { status: 'password_expired'; changeToken: string };
 
 export interface CurrentUser {
   userId: string;
