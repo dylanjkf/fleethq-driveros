@@ -74,7 +74,7 @@ beforeEach(() => {
 });
 
 describe('StopPage — configurable multi-drop POD', () => {
-  it('blocks submit until the required photo is captured, then sends evidence + parcelIds', async () => {
+  it('blocks submit until the required photo AND an unscanned-parcel override, then sends evidence + parcelIds', async () => {
     const user = userEvent.setup();
     const { container } = renderStop();
 
@@ -95,6 +95,15 @@ describe('StopPage — configurable multi-drop POD', () => {
     await user.upload(fileInput, file);
     await waitFor(() => expect(screen.getByAltText('Delivery photo')).toBeInTheDocument());
 
+    // Photo is captured, but BOTH parcels are unscanned — the multi-drop guard
+    // now blocks a silent zero-scan delivery until the override is acknowledged.
+    await user.click(screen.getByRole('button', { name: 'Save delivery' }));
+    expect(screen.getByText(/Scan them, or tick "Deliver unscanned"/)).toBeInTheDocument();
+    expect(jobsApi.completeStop).not.toHaveBeenCalled();
+
+    // Tick the explicit "Deliver unscanned" override.
+    await user.click(screen.getByRole('checkbox'));
+
     // Now submit succeeds and carries the evidence answer + parcelIds.
     await user.click(screen.getByRole('button', { name: 'Save delivery' }));
     await waitFor(() => expect(jobsApi.completeStop).toHaveBeenCalledTimes(1));
@@ -113,5 +122,34 @@ describe('StopPage — configurable multi-drop POD', () => {
     expect(value.contentType).toBe('image/jpeg');
     expect(value.base64.length).toBeGreaterThan(0);
     expect(value.base64.startsWith('data:')).toBe(false); // bare payload, not a data URL
+  });
+
+  it('a stop whose parcels are all already scanned needs no override and submits directly', async () => {
+    // Both parcels arrive already scanned — no unconfirmed items, so no override
+    // gate and no override checkbox.
+    vi.spyOn(parcelsApi, 'getStopParcels').mockResolvedValue({
+      parcels: [
+        { id: 'P1', reference: 'REF-1', label: null, scannedAt: '2026-08-12T00:00:00Z' },
+        { id: 'P2', reference: 'REF-2', label: null, scannedAt: '2026-08-12T00:00:00Z' },
+      ],
+      scanned: 2,
+      total: 2,
+    });
+    const user = userEvent.setup();
+    const { container } = renderStop();
+
+    await user.click(screen.getByRole('button', { name: 'Delivered' }));
+    await waitFor(() => expect(screen.getByText('Delivery photo')).toBeInTheDocument());
+    // No override control — nothing is unconfirmed.
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, new File(['\xff\xd8\xff\xe0jpegbytes'], 'shot.jpg', { type: 'image/jpeg' }));
+    await waitFor(() => expect(screen.getByAltText('Delivery photo')).toBeInTheDocument());
+
+    // Submits straight away — no override needed.
+    await user.click(screen.getByRole('button', { name: 'Save delivery' }));
+    await waitFor(() => expect(jobsApi.completeStop).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(jobsApi.completeStop).mock.calls[0][2].outcome).toBe('DELIVERED');
   });
 });

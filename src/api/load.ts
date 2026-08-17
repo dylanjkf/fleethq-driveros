@@ -56,6 +56,17 @@ export async function getLoadStatus(jobId: string): Promise<LoadStatus> {
   }
 }
 
+/**
+ * Persist an optimistic load-status update — e.g. a parcel just scanned while
+ * offline — to the SAME cache `getLoadStatus` reads back. Without this a scan
+ * lives only in React state plus the replay outbox: an app restart in a dead
+ * zone reloads the last server-synced status and the scanned parcel reappears as
+ * "missing". Mirrors the offline persistence StopPage does via `cacheStopOutcome`.
+ */
+export async function cacheLoadStatus(status: LoadStatus): Promise<void> {
+  await setCache(loadStatusCacheKey(status.jobId), status);
+}
+
 export interface VerifyLoadInput {
   confirm: boolean;
   /** Set only when the driver is knowingly proceeding past a discrepancy. */

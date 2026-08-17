@@ -104,10 +104,13 @@ export function LoginPage() {
   }
 
   function openForgot() {
-    // Don't carry the typed password over to the recovery step, and start the
-    // identifier from the username field only as a convenience.
+    // Start the recovery identifier EMPTY — never prefilled from the login
+    // field. On a shared tablet, carrying whatever username the previous driver
+    // typed into the reset screen would expose or suggest their handle to whoever
+    // picks the device up next. The driver enters their own identifier fresh
+    // (matching how resetIdentifier is also never persisted across the step).
     setFormError(null);
-    setResetIdentifier(username);
+    setResetIdentifier('');
     setResetSent(false);
     setView('forgot');
   }

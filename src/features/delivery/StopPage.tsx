@@ -66,6 +66,12 @@ export function StopPage() {
   });
 
   const [parcels, setParcels] = useState<Parcel[]>([]);
+  // Explicit acknowledgement that a DELIVERED stop is going out with one or more
+  // parcels that were never scanned/confirmed (multi-drop guard). Nothing is
+  // delivered unconfirmed *silently*: the server records who/when/what on this
+  // override (pod_unconfirmed_override), same contract as the load-verification
+  // discrepancy override.
+  const [overrideUnconfirmed, setOverrideUnconfirmed] = useState(false);
   const [scanInput, setScanInput] = useState('');
   const [scanning, setScanning] = useState(false);
   // Non-blocking status for the camera scanner (permission denied, no-read,
@@ -170,6 +176,18 @@ export function StopPage() {
           .filter((f) => !isEmptyValue(evidenceAnswers[f.id]))
           .map((f) => ({ fieldId: f.id, value: evidenceAnswers[f.id] })),
       };
+    }
+
+    // Multi-drop guard: a DELIVERED stop must not go out with parcels that were
+    // never scanned/confirmed unless the driver explicitly overrides. Block the
+    // submit until every parcel is scanned OR the override below is ticked — the
+    // server then records the unconfirmed set (who/when/what).
+    const unscanned = parcels.filter((p) => !p.scannedAt);
+    if (outcome === 'DELIVERED' && unscanned.length > 0 && !overrideUnconfirmed) {
+      setError(
+        `${unscanned.length} parcel${unscanned.length === 1 ? '' : 's'} not scanned. Scan ${unscanned.length === 1 ? 'it' : 'them'}, or tick "Deliver unscanned" to proceed — it's recorded.`,
+      );
+      return;
     }
 
     setError(null);
@@ -392,6 +410,24 @@ export function StopPage() {
                 <SignaturePad onChange={setSignatureDataUrl} />
               </div>
             </>
+          )}
+
+          {outcome === 'DELIVERED' && parcels.some((p) => !p.scannedAt) && (
+            <label className="flex items-start gap-3 rounded-2xl border border-warning-500/40 bg-warning-500/10 p-4 text-sm">
+              <input
+                type="checkbox"
+                checked={overrideUnconfirmed}
+                onChange={(e) => {
+                  setOverrideUnconfirmed(e.target.checked);
+                  setError(null);
+                }}
+                className="mt-1 size-5 shrink-0"
+              />
+              <span>
+                Deliver unscanned — {parcels.filter((p) => !p.scannedAt).length} parcel
+                {parcels.filter((p) => !p.scannedAt).length === 1 ? '' : 's'} not scanned. Proceeding is recorded against this run.
+              </span>
+            </label>
           )}
 
           {error && <p className="text-danger-500">{error}</p>}

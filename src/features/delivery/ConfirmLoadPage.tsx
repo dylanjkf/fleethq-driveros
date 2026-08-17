@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
-import { getLoadStatus, verifyLoad, type LoadStatus } from '@/api/load';
+import { getLoadStatus, verifyLoad, cacheLoadStatus, type LoadStatus } from '@/api/load';
 import { submitScannedReference } from './scan-submit';
 import { scanBarcodeWithCamera } from '@/lib/barcode-scanner';
 import { Button } from '@/components/ui/Button';
@@ -86,7 +86,14 @@ export function ConfirmLoadPage() {
       return;
     }
     setScanMessage(null);
-    setStatus((prev) => (prev ? markInStatus(prev, reference) : prev));
+    const optimistic = markInStatus(status, reference);
+    setStatus(optimistic);
+    // Persist the optimistic scan to the offline cache BEFORE anything else, so
+    // it survives an app restart in a dead zone. Without this, a scan lives only
+    // in React state + the replay outbox, and a restart while offline reloads
+    // the pre-scan server status — the parcel would wrongly reappear as missing.
+    // Mirrors StopPage's cacheStopOutcome.
+    await cacheLoadStatus(optimistic);
     // Reuse the one server matching path (scanStopParcel → …/parcels/scan). The
     // per-stop setParcels is a no-op here — we reconcile the aggregate below.
     await submitScannedReference(reference, {
@@ -96,12 +103,13 @@ export function ConfirmLoadPage() {
       setScanning,
       setError: (m) => setError(m),
     });
-    // Reconcile against the authoritative aggregate when online; offline this
-    // falls back to the cached status, leaving the optimistic mark in place.
+    // Reconcile against the authoritative aggregate when online (getLoadStatus
+    // re-caches it); offline this throws and we keep the optimistic mark, which
+    // is already persisted above.
     try {
       setStatus(await getLoadStatus(jobId));
     } catch {
-      /* offline — keep optimistic state */
+      /* offline — keep optimistic state (already cached) */
     }
   }
 

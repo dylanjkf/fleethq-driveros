@@ -16,7 +16,8 @@ import type { LoadStatus } from '@/api/load';
  */
 const getLoadStatus = vi.hoisted(() => vi.fn());
 const verifyLoad = vi.hoisted(() => vi.fn());
-vi.mock('@/api/load', () => ({ getLoadStatus, verifyLoad }));
+const cacheLoadStatus = vi.hoisted(() => vi.fn());
+vi.mock('@/api/load', () => ({ getLoadStatus, verifyLoad, cacheLoadStatus }));
 // The shared scan path is exercised by its own spec; here it's a no-op so the
 // screen's discrepancy/override logic is what's under test.
 vi.mock('./scan-submit', () => ({ submitScannedReference: vi.fn().mockResolvedValue(undefined) }));
@@ -80,7 +81,27 @@ describe('ConfirmLoadPage — discrepancy + proceed-anyway', () => {
   beforeEach(() => {
     getLoadStatus.mockReset();
     verifyLoad.mockReset();
+    cacheLoadStatus.mockReset();
+    cacheLoadStatus.mockResolvedValue(undefined);
     verifyLoad.mockResolvedValue({ queued: false });
+  });
+
+  it('persists an optimistic scan to the offline cache so it survives a restart (Part 3)', async () => {
+    // First mount: A-2 is missing. The reconcile refetch fails (offline), so the
+    // optimistic scan must stay — and must have been written to the offline cache.
+    getLoadStatus.mockResolvedValueOnce(statusWithMissing()).mockRejectedValueOnce(new Error('offline'));
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText('1 item not confirmed loaded');
+    await user.type(screen.getByPlaceholderText('Scan or enter parcel barcode'), 'A-2');
+    await user.click(screen.getByRole('button', { name: 'Scan' }));
+
+    // The optimistic status was persisted with A-2 now scanned — that cache is
+    // what an offline restart reloads (proven end-to-end in api/load.spec.ts).
+    await waitFor(() => expect(cacheLoadStatus).toHaveBeenCalledTimes(1));
+    const cached = cacheLoadStatus.mock.calls[0][0] as LoadStatus;
+    expect(cached.stops[0].parcels.find((p) => p.reference === 'A-2')?.scannedAt).toBeTruthy();
   });
 
   it('shows the discrepancy and offers Proceed anyway (no clean confirm)', async () => {
