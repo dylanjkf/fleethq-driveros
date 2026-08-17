@@ -59,6 +59,20 @@ describe('LoginPage forgot-password flow', () => {
     expect(screen.queryByPlaceholderText('Password')).not.toBeInTheDocument();
   });
 
+  it('starts the forgot-password field EMPTY even when a username was typed into login (shared-tablet leak)', async () => {
+    const user = userEvent.setup();
+    renderLogin();
+
+    // A driver types their username into the login field but then taps "Forgot".
+    await user.type(screen.getByPlaceholderText('Username'), 'driver.jones');
+    await user.click(screen.getByText('Forgot your password?'));
+
+    // The recovery identifier must NOT be prefilled with the login username —
+    // otherwise the next person on the shared tablet sees driver.jones's handle.
+    const resetField = screen.getByPlaceholderText('Username or email') as HTMLInputElement;
+    expect(resetField.value).toBe('');
+  });
+
   it('surfaces a retry message on network failure without revealing account state', async () => {
     requestPasswordReset.mockRejectedValue(new Error('network down'));
     const user = userEvent.setup();
