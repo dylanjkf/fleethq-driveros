@@ -1,8 +1,37 @@
 import { apiClient } from './client';
 import type { CurrentUser, LoginResult } from './types';
 
+/**
+ * A device fingerprint generated once per tablet and persisted (A3), so the
+ * server can tell a genuinely new account-device pairing from ordinary network
+ * churn — a shared tablet on rotating cellular IPs otherwise trips a "new device"
+ * email every shift. This is deliberately NOT a "trusted device": DriverOS never
+ * asks the server to skip MFA on it (unsafe on shared hardware — the next driver
+ * must still be challenged); it only lets the new-device *alert* recognise a
+ * device it has seen before. Mirrors the office/admin persistence.
+ */
+export function getOrCreateDeviceFingerprint(): string {
+  const KEY = 'fleethq.driveros.deviceFingerprint';
+  try {
+    const existing = localStorage.getItem(KEY);
+    if (existing) return existing;
+    const value = crypto.randomUUID();
+    localStorage.setItem(KEY, value);
+    return value;
+  } catch {
+    // localStorage unavailable (private mode / locked-down tablet): fall back to
+    // an ephemeral id so login still works — the server just treats the login as
+    // a new device (the pre-fix behaviour) rather than the app crashing.
+    return crypto.randomUUID();
+  }
+}
+
 export async function login(username: string, password: string): Promise<LoginResult> {
-  const { data } = await apiClient.post<LoginResult>('/v1/auth/login', { username, password });
+  const { data } = await apiClient.post<LoginResult>('/v1/auth/login', {
+    username,
+    password,
+    deviceFingerprint: getOrCreateDeviceFingerprint(),
+  });
   return data;
 }
 
