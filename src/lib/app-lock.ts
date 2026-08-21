@@ -16,12 +16,28 @@ const PIN_HASH_KEY = 'driveros.lock.pinHash';
 const SALT_KEY = 'driveros.lock.salt';
 const TIMEOUT_KEY = 'driveros.lock.timeoutMs';
 const LAST_ACTIVE_KEY = 'driveros.lock.lastActive';
+const FAILED_ATTEMPTS_KEY = 'driveros.lock.failedAttempts';
+const LOCKOUT_UNTIL_KEY = 'driveros.lock.lockoutUntil';
 
 /** Default idle/background timeout before the app re-locks. */
 export const DEFAULT_LOCK_TIMEOUT_MS = 2 * 60_000;
 /** Allowed timeout choices surfaced in the UI. */
 export const LOCK_TIMEOUT_OPTIONS_MS = [60_000, 2 * 60_000, 5 * 60_000, 15 * 60_000];
 const MIN_PIN_LENGTH = 4;
+
+/** Consecutive wrong-PIN attempts allowed before a timed lockout kicks in. */
+export const MAX_PIN_ATTEMPTS = 5;
+/** How long PIN entry is refused after MAX_PIN_ATTEMPTS consecutive failures. */
+export const PIN_LOCKOUT_MS = 60_000;
+
+export interface LockoutState {
+  /** True while PIN entry is refused. */
+  lockedOut: boolean;
+  /** ms timestamp the lockout ends, or null when not locked out. */
+  until: number | null;
+  /** Wrong attempts remaining before the next lockout. */
+  attemptsRemaining: number;
+}
 
 function toHex(buf: ArrayBuffer): string {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -52,12 +68,57 @@ export async function setPin(pin: string, at: number = Date.now()): Promise<void
   recordActivity(at);
 }
 
-/** Constant-ish check of a candidate PIN against the stored hash. */
-export async function verifyPin(pin: string): Promise<boolean> {
+function readInt(key: string): number {
+  const raw = Number(localStorage.getItem(key));
+  return Number.isFinite(raw) ? raw : 0;
+}
+
+/**
+ * Current lockout state — drives the LockScreen's "too many attempts" message
+ * and disabled entry, and gates verifyPin below.
+ */
+export function getLockoutState(now: number = Date.now()): LockoutState {
+  const until = readInt(LOCKOUT_UNTIL_KEY);
+  if (until > now) return { lockedOut: true, until, attemptsRemaining: 0 };
+  const failed = readInt(FAILED_ATTEMPTS_KEY);
+  return { lockedOut: false, until: null, attemptsRemaining: Math.max(0, MAX_PIN_ATTEMPTS - failed) };
+}
+
+function clearLockoutState(): void {
+  localStorage.removeItem(FAILED_ATTEMPTS_KEY);
+  localStorage.removeItem(LOCKOUT_UNTIL_KEY);
+}
+
+/**
+ * Check a candidate PIN against the stored hash, with brute-force lockout.
+ * Without a cap the numeric PIN (as few as 4 digits) is trivially guessable by
+ * repeated entry on a shared tablet. After MAX_PIN_ATTEMPTS consecutive wrong
+ * entries, PIN entry is refused for PIN_LOCKOUT_MS; a locked-out attempt is not
+ * even hashed. A correct PIN clears the counter and any lockout. `now` is
+ * injectable for deterministic tests.
+ */
+export async function verifyPin(pin: string, now: number = Date.now()): Promise<boolean> {
+  // Locked out: refuse without counting (the counter already tripped the lock).
+  if (getLockoutState(now).lockedOut) return false;
+
   const saltHex = localStorage.getItem(SALT_KEY);
   const stored = localStorage.getItem(PIN_HASH_KEY);
   if (!saltHex || !stored) return false;
-  return (await hashPin(pin, saltHex)) === stored;
+
+  if ((await hashPin(pin, saltHex)) === stored) {
+    clearLockoutState(); // correct PIN → fresh slate
+    return true;
+  }
+
+  // Wrong PIN: count it, and start a timed lockout once the cap is reached.
+  const failed = readInt(FAILED_ATTEMPTS_KEY) + 1;
+  if (failed >= MAX_PIN_ATTEMPTS) {
+    localStorage.setItem(LOCKOUT_UNTIL_KEY, String(now + PIN_LOCKOUT_MS));
+    localStorage.removeItem(FAILED_ATTEMPTS_KEY); // fresh set of attempts once the lockout elapses
+  } else {
+    localStorage.setItem(FAILED_ATTEMPTS_KEY, String(failed));
+  }
+  return false;
 }
 
 /** Remove all lock config (on logout, or when the driver disables the lock). */
@@ -66,6 +127,7 @@ export function disableLock(): void {
   localStorage.removeItem(SALT_KEY);
   localStorage.removeItem(TIMEOUT_KEY);
   localStorage.removeItem(LAST_ACTIVE_KEY);
+  clearLockoutState();
 }
 
 export function getLockTimeoutMs(): number {
