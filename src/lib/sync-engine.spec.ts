@@ -148,6 +148,82 @@ describe('drainOutbox', () => {
     expect(await offlineDb.getDeadLetter()).toEqual([]); // nothing dead-lettered
   });
 
+  it('dead-letters a retryable item that never succeeds after the attempt cap, and the queue drains past it', async () => {
+    // Item a keeps failing in a *retryable* shape (a persistent 5xx) — the kind
+    // that, without a cap, `break`s the pass forever and blocks everything behind
+    // it. Item b (a driver's "need help" message) is queued after it and must
+    // eventually get through. a is the poison; b is what a would otherwise strand.
+    requestMock.mockImplementation((req: { url: string }) => {
+      if (req.url === '/v1/a') return Promise.reject(Object.assign(new Error('server error'), { status: 503 }));
+      return Promise.resolve({});
+    });
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/a', body: { n: 1 } });
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/b', body: { n: 2 } });
+
+    // Up to (but not reaching) the cap: a keeps FIFO — it stays queued and b is
+    // held behind it, never attempted.
+    for (let i = 0; i < syncEngine.MAX_RETRYABLE_ATTEMPTS - 1; i++) {
+      await syncEngine.drainOutbox();
+    }
+    let remaining = await offlineDb.getOutbox();
+    expect(remaining.map((i) => (i.body as { n: number }).n)).toEqual([1, 2]); // both still queued, order intact
+    expect(remaining[0].attempts).toBe(syncEngine.MAX_RETRYABLE_ATTEMPTS - 1); // attempts accrued, one short of the cap
+    expect(await offlineDb.getDeadLetter()).toEqual([]); // not poison yet
+    expect(requestMock).not.toHaveBeenCalledWith(expect.objectContaining({ url: '/v1/b' })); // b never jumped ahead
+
+    // The cap-hitting pass sets a aside and, in the SAME pass, lets b through.
+    await syncEngine.drainOutbox();
+
+    expect(await offlineDb.getOutbox()).toEqual([]); // a dead-lettered, b sent — nothing left blocking
+    const dead = await offlineDb.getDeadLetter();
+    expect(dead.map((i) => (i.body as { n: number }).n)).toEqual([1]); // a is the one set aside
+    expect(dead[0].lastError).toContain('stuck after'); // per-item reason names the poison verdict...
+    expect(dead[0].lastError).toContain('503'); // ...and carries the underlying error detail
+    expect(requestMock).toHaveBeenCalledWith(expect.objectContaining({ url: '/v1/b' })); // b really did send
+  });
+
+  it('genuine offline never counts toward the poison cap — attempts do not accrue while offline', async () => {
+    // A real dead zone must not slowly dead-letter good work: while offline the
+    // drain returns before touching the queue, so no attempts are burned no
+    // matter how many drains fire.
+    vi.stubGlobal('navigator', { ...navigator, onLine: false });
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/a', body: { n: 1 } });
+
+    for (let i = 0; i < syncEngine.MAX_RETRYABLE_ATTEMPTS + 3; i++) {
+      await syncEngine.drainOutbox();
+    }
+
+    expect(requestMock).not.toHaveBeenCalled();
+    const remaining = await offlineDb.getOutbox();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].attempts ?? 0).toBe(0); // offline drains never advanced the counter
+    expect(await offlineDb.getDeadLetter()).toEqual([]); // and never poisoned a genuinely-offline item
+  });
+
+  it('a 401 does not advance the poison cap — a good item survives repeated logged-out drains and still sends after re-auth', async () => {
+    // Every pass 401s (token expired mid-shift). A 401 is a session signal, not
+    // the item's fault, so it must never push a healthy item toward the cap —
+    // otherwise a device left logged-out would dead-letter good work.
+    requestMock.mockRejectedValue(Object.assign(new Error('Unauthorized'), { status: 401 }));
+    await offlineDb.queueMutation({ method: 'POST', url: '/v1/a', body: { n: 1 } });
+
+    for (let i = 0; i < syncEngine.MAX_RETRYABLE_ATTEMPTS + 2; i++) {
+      await syncEngine.drainOutbox();
+    }
+
+    expect(await offlineDb.getDeadLetter()).toEqual([]); // never dead-lettered despite many failed passes
+    const remaining = await offlineDb.getOutbox();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].attempts ?? 0).toBe(0); // 401s did not burn the poison counter
+
+    // Re-auth: the same item now sends on the first good pass.
+    requestMock.mockReset();
+    requestMock.mockResolvedValue({});
+    await syncEngine.drainOutbox();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(await offlineDb.getOutbox()).toEqual([]);
+  });
+
   it('treats a declared idempotent-replay conflict as success — a replayed shift start that returns SHIFT_ALREADY_ACTIVE clears, not dead-letters', async () => {
     // The action succeeded on an earlier attempt whose response was lost; the
     // replay hits a 409 the item declares as "already done". It must NOT dead-

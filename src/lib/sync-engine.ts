@@ -42,6 +42,34 @@ let draining = false;
  *  leak a timer. */
 const PERIODIC_RETRY_MS = 30_000;
 
+/**
+ * How many times a single item may fail a replay *while online* before it is
+ * treated as poison and set aside, even when its error still classifies as
+ * "retryable".
+ *
+ * Without a cap, a retryable-looking failure `break`s the pass to preserve FIFO
+ * (below) and is retried forever — so one item that can never succeed but always
+ * fails in a retryable shape (a payload the server perpetually 500s on, an error
+ * with no `status` so it reads as a network drop, an unrecognised error shape
+ * defaulting to retryable) blocks the ENTIRE queue behind it indefinitely. On a
+ * driver's device that means a POD, a fault report, or a "broke down, need help"
+ * message queued after it can never send — the single most dangerous offline
+ * failure mode. The cap bounds that blockage: after N online failures the item
+ * is dead-lettered (surfaced to the driver to retry/discard) and the drain
+ * continues past it, exactly like a permanent 4xx.
+ *
+ * 8 is chosen deliberately. Genuine offline never counts toward it — a real dead
+ * zone returns early at the `navigator.onLine` guard below without touching the
+ * queue, so only online-but-failing attempts accrue. With the 30s periodic
+ * sweep (plus an extra drain on every `online` event), 8 attempts is on the
+ * order of minutes of continuous online failure — long enough to ride out a
+ * transient server 5xx or a rate-limit window and still succeed, short enough
+ * that a truly poison item can't hold a safety-critical message hostage for more
+ * than a few minutes. A 401 does NOT count (it's a session signal, not the
+ * item's fault — see the drain loop).
+ */
+export const MAX_RETRYABLE_ATTEMPTS = 8;
+
 async function currentState(): Promise<OutboxState> {
   const owner = currentOwnerId();
   const [outbox, deadLetter] = await Promise.all([countOutboxOwnership(owner), countDeadLetterOwnership(owner)]);
@@ -125,6 +153,13 @@ function isIdempotentReplay(error: unknown, item: { idempotentReplayCodes?: stri
  * every later one (a POD, a fault report, an "I need help" message) from ever
  * sending — the single most dangerous offline failure mode for a driver in a
  * dead zone.
+ *
+ * Transient retries are not unbounded: an item that keeps failing in a retryable
+ * shape but never succeeds is dead-lettered after MAX_RETRYABLE_ATTEMPTS online
+ * passes (see the constant), so a poison item whose error merely *looks*
+ * transient — a persistent 5xx, a status-less network error, an unknown error
+ * shape — also can't block the queue forever. Genuine offline never burns those
+ * attempts: the `navigator.onLine` guard returns before the queue is touched.
  */
 export async function drainOutbox(): Promise<void> {
   if (draining) return;
@@ -160,12 +195,29 @@ export async function drainOutbox(): Promise<void> {
         if (isAuthFailure(error)) {
           // Session ended mid-drain: preserve the whole remaining queue and stop.
           // (See isAuthFailure — never mass-dead-letter a batch on one 401.)
-          await markOutboxAttempt(item.id, (item.attempts ?? 0) + 1, describeError(error));
+          // Record the reason for diagnostics but do NOT bump `attempts`: a 401
+          // is not a delivery attempt against a working session, so it must not
+          // push a good item toward the poison cap (a device left logged-out
+          // would otherwise dead-letter healthy work after enough 401'd drains).
+          await markOutboxAttempt(item.id, item.attempts ?? 0, describeError(error));
           break;
         }
         if (isRetryable(error)) {
-          // Keep FIFO: record the attempt and stop; the rest stays queued.
-          await markOutboxAttempt(item.id, (item.attempts ?? 0) + 1, describeError(error));
+          const nextAttempts = (item.attempts ?? 0) + 1;
+          if (nextAttempts >= MAX_RETRYABLE_ATTEMPTS) {
+            // Poison: it keeps failing in a retryable shape but has never
+            // succeeded across MAX_RETRYABLE_ATTEMPTS online passes. Stop letting
+            // it block the queue — dead-letter it (with the per-item reason and
+            // attempt count, so the driver's banner shows which item and why) and
+            // continue past it, so a POD/fault/help message behind it can finally
+            // send. This is the retryable-poison analogue of the permanent-4xx
+            // case below.
+            await moveToDeadLetter(item, `stuck after ${nextAttempts} attempts — ${describeError(error)}`);
+            continue;
+          }
+          // Under the cap: keep FIFO — record the attempt and stop; the rest
+          // stays queued and is retried on the next online/queue/timer drain.
+          await markOutboxAttempt(item.id, nextAttempts, describeError(error));
           break;
         }
         // Permanent: set it aside and keep draining the rest of the queue.
