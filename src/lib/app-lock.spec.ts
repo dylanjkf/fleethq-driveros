@@ -2,9 +2,12 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_LOCK_TIMEOUT_MS,
   disableLock,
+  getLockoutState,
   getLockTimeoutMs,
   isLockConfigured,
   isValidPin,
+  MAX_PIN_ATTEMPTS,
+  PIN_LOCKOUT_MS,
   recordActivity,
   setLockTimeoutMs,
   setPin,
@@ -82,5 +85,58 @@ describe('app-lock (M4)', () => {
     expect(isLockConfigured()).toBe(false);
     expect(await verifyPin('7777')).toBe(false);
     expect(shouldAutoLock(Date.now())).toBe(false);
+  });
+
+  describe('PIN attempt lockout', () => {
+    it('locks out after MAX_PIN_ATTEMPTS wrong entries and then refuses even the correct PIN', async () => {
+      const t0 = 1_000_000;
+      await setPin('4821', t0);
+
+      // Wrong attempts up to the cap.
+      for (let i = 0; i < MAX_PIN_ATTEMPTS; i++) {
+        expect(await verifyPin('0000', t0)).toBe(false);
+      }
+
+      // Now locked out — even the CORRECT PIN is refused (this is what bounds brute force).
+      const state = getLockoutState(t0);
+      expect(state.lockedOut).toBe(true);
+      expect(state.until).toBe(t0 + PIN_LOCKOUT_MS);
+      expect(await verifyPin('4821', t0)).toBe(false);
+    });
+
+    it('lets the correct PIN through once the lockout window has elapsed', async () => {
+      const t0 = 2_000_000;
+      await setPin('4821', t0);
+      for (let i = 0; i < MAX_PIN_ATTEMPTS; i++) await verifyPin('0000', t0);
+      expect(getLockoutState(t0).lockedOut).toBe(true);
+
+      // Still locked one ms before the window ends...
+      expect(await verifyPin('4821', t0 + PIN_LOCKOUT_MS - 1)).toBe(false);
+      // ...and unlocked the moment it elapses.
+      const after = t0 + PIN_LOCKOUT_MS;
+      expect(getLockoutState(after).lockedOut).toBe(false);
+      expect(await verifyPin('4821', after)).toBe(true);
+    });
+
+    it('a correct PIN resets the failed-attempt counter (no lockout from spread-out mistakes)', async () => {
+      const t0 = 3_000_000;
+      await setPin('4821', t0);
+      // Fewer than the cap, then a success clears the count.
+      await verifyPin('0000', t0);
+      await verifyPin('0000', t0);
+      expect(await verifyPin('4821', t0)).toBe(true);
+      // A fresh run of wrong attempts starts from zero — the earlier two don't carry over.
+      for (let i = 0; i < MAX_PIN_ATTEMPTS - 1; i++) expect(await verifyPin('0000', t0)).toBe(false);
+      expect(getLockoutState(t0).lockedOut).toBe(false);
+    });
+
+    it('disableLock also clears an active lockout', async () => {
+      const t0 = 4_000_000;
+      await setPin('4821', t0);
+      for (let i = 0; i < MAX_PIN_ATTEMPTS; i++) await verifyPin('0000', t0);
+      expect(getLockoutState(t0).lockedOut).toBe(true);
+      disableLock();
+      expect(getLockoutState(t0).lockedOut).toBe(false);
+    });
   });
 });

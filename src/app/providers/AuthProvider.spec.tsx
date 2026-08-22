@@ -36,6 +36,9 @@ vi.mock('@/lib/push-registration', () => ({
   disablePushNotifications: vi.fn(async () => {
     calls.push('disablePush');
   }),
+  clearPushBannerDismissal: vi.fn(() => {
+    calls.push('clearBanner');
+  }),
 }));
 
 let captured401Handler: (() => void | Promise<void>) | null = null;
@@ -92,10 +95,13 @@ describe('AuthProvider logout / 401 orchestration', () => {
     expect(calls.indexOf('disablePush')).toBeLessThan(calls.indexOf('token.clear'));
     // local IndexedDB wipe happens after the token is cleared
     expect(calls.indexOf('token.clear')).toBeLessThan(calls.indexOf('clearSensitiveData'));
+    // the shared-tablet push-banner dismissal is cleared on logout so the next
+    // driver is prompted for their own notifications
+    expect(calls).toContain('clearBanner');
     expect(screen.getByTestId('status').textContent).toBe('unauthenticated');
   });
 
-  it('registers a 401 handler that awaits the purge and ends the session', async () => {
+  it('registers a 401 handler that awaits the purge (push before caches) and ends the session', async () => {
     renderProvider();
     expect(captured401Handler).toBeTypeOf('function');
 
@@ -103,9 +109,13 @@ describe('AuthProvider logout / 401 orchestration', () => {
       await captured401Handler!();
     });
 
-    // the 401 purge tears down push + IndexedDB and lands unauthenticated
+    // the 401 purge tears down push FIRST (while the token is still valid — the
+    // client clears it only after this handler resolves), then IndexedDB, then
+    // clears the per-driver push-banner dismissal; lands unauthenticated.
     expect(calls).toContain('disablePush');
     expect(calls).toContain('clearSensitiveData');
+    expect(calls.indexOf('disablePush')).toBeLessThan(calls.indexOf('clearSensitiveData'));
+    expect(calls).toContain('clearBanner');
     expect(screen.getByTestId('status').textContent).toBe('unauthenticated');
   });
 });

@@ -2,6 +2,10 @@ import axios, { type AxiosError } from 'axios';
 import { tokenStore } from './token-store';
 import type { ApiErrorBody } from './types';
 
+/** Injected by Vite's `define` (see vite.config.ts) from package.json's version. */
+declare const __APP_VERSION__: string;
+const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
+
 /** Normalized client-side error — status 0 means "no response at all" (offline/network failure), never a real server verdict. */
 export class ApiClientError extends Error {
   code: string;
@@ -36,6 +40,10 @@ export class ApiClientError extends Error {
 export const apiClient = axios.create({ baseURL: import.meta.env.VITE_API_BASE || '/', timeout: 30_000 });
 
 apiClient.interceptors.request.use((config) => {
+  // Every request advertises the running build so the server can enforce a
+  // minimum-supported version and force an upgrade (see the 426/UPGRADE_REQUIRED
+  // handling below) rather than letting an old client hit incompatible APIs.
+  config.headers['X-App-Version'] = APP_VERSION;
   const token = tokenStore.get();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
@@ -46,6 +54,20 @@ apiClient.interceptors.request.use((config) => {
 let onUnauthorized: (() => void | Promise<void>) | null = null;
 export function setUnauthorizedHandler(handler: () => void | Promise<void>): void {
   onUnauthorized = handler;
+}
+
+/**
+ * Invoked when the server tells this build it is too old to continue — an HTTP
+ * 426 (Upgrade Required) or an `UPGRADE_REQUIRED` error code. The app registers a
+ * handler that shows a blocking "please update" screen. Fired at most once.
+ */
+let onUpgradeRequired: (() => void) | null = null;
+let upgradeSignalled = false;
+export function setUpgradeRequiredHandler(handler: () => void): void {
+  onUpgradeRequired = handler;
+  // If the signal already fired before the gate mounted, deliver it now so the
+  // blocking screen still shows.
+  if (upgradeSignalled) handler();
 }
 
 let confirmingSession = false;
@@ -71,10 +93,15 @@ async function confirmAndHandleUnauthorized(): Promise<void> {
     const base = import.meta.env.VITE_API_BASE || '';
     const res = await fetch(`${base}/v1/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
     if (res.status === 401) {
-      tokenStore.clear();
-      // Await the session-data purge so IndexedDB + push teardown is guaranteed
-      // to finish before anything reacts to the now-unauthenticated state.
+      // Order matches the explicit logout path (AuthProvider.logout): tear down
+      // the push subscription FIRST — while the access token is still valid,
+      // because the server-side POST /v1/push/unsubscribe needs auth — and only
+      // THEN clear the token. Clearing the token first (the previous order) sent
+      // the unsubscribe with no Authorization header, so it 401'd and left the
+      // subscription live server-side: the next driver on a shared tablet could
+      // keep receiving this driver's push notifications.
       await onUnauthorized?.();
+      tokenStore.clear();
     }
     // Any other outcome (200, 5xx, …) means the session is still valid; leave it.
   } catch {
@@ -89,6 +116,14 @@ apiClient.interceptors.response.use(
   (error: AxiosError<ApiErrorBody>) => {
     const status = error.response?.status ?? 0;
     const body = error.response?.data?.error;
+
+    // The server can refuse an out-of-date build: HTTP 426, or an
+    // UPGRADE_REQUIRED code on any status. Signal the app once so it can show a
+    // blocking upgrade screen (this is terminal — no retry helps).
+    if ((status === 426 || body?.code === 'UPGRADE_REQUIRED') && !upgradeSignalled) {
+      upgradeSignalled = true;
+      onUpgradeRequired?.();
+    }
 
     // Only a real 401 clears the session — a network failure (status 0,
     // e.g. offline) must never look like an invalid login, per DriverOS's

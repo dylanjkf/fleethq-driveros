@@ -57,3 +57,20 @@ export async function disablePushNotifications(): Promise<void> {
   await subscription.unsubscribe();
   await unsubscribePush(endpoint);
 }
+
+/**
+ * localStorage flag set when a driver taps "Not now" on the enable-push banner
+ * (TodayPage). It's a per-driver UI preference, so on a SHARED tablet it must be
+ * cleared at logout — otherwise one driver's dismissal silently suppresses the
+ * banner for the next driver who signs in, and they never get prompted to enable
+ * their own push notifications.
+ */
+export const PUSH_BANNER_DISMISSED_KEY = 'driveros:push-banner-dismissed';
+
+export function clearPushBannerDismissal(): void {
+  try {
+    localStorage.removeItem(PUSH_BANNER_DISMISSED_KEY);
+  } catch {
+    // localStorage unavailable (private mode / disabled) — nothing to clear.
+  }
+}

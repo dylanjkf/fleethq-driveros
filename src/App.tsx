@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from 'react-router';
 import { AuthProvider } from '@/app/providers/AuthProvider';
 import { AppLockProvider } from '@/app/providers/AppLockProvider';
+import { ForcedUpgradeGate } from '@/app/ForcedUpgradeGate';
 import { router } from '@/app/router';
 import { initSyncEngine } from '@/lib/sync-engine';
 
@@ -34,11 +35,13 @@ function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <AppLockProvider>
-          <RouterProvider router={router} />
-        </AppLockProvider>
-      </AuthProvider>
+      <ForcedUpgradeGate>
+        <AuthProvider>
+          <AppLockProvider>
+            <RouterProvider router={router} />
+          </AppLockProvider>
+        </AuthProvider>
+      </ForcedUpgradeGate>
     </QueryClientProvider>
   );
 }

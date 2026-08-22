@@ -4,7 +4,7 @@ import * as authApi from '@/api/auth';
 import { setUnauthorizedHandler } from '@/api/client';
 import { tokenStore } from '@/api/token-store';
 import { getCache, setCache, clearSensitiveData } from '@/lib/offline-db';
-import { disablePushNotifications } from '@/lib/push-registration';
+import { clearPushBannerDismissal, disablePushNotifications } from '@/lib/push-registration';
 import type { CurrentUser, LoginResult } from '@/api/types';
 
 const ME_CACHE_KEY = 'me';
@@ -42,9 +42,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * Unsynced outbox work is deliberately preserved (see clearSensitiveData).
    */
   const purgeSessionData = useCallback(async () => {
+    // Push teardown FIRST — the client's 401 handler now clears the access token
+    // only after this runs, and the server-side unsubscribe needs a valid token
+    // (same reasoning as logout below). Then wipe caches.
+    await disablePushNotifications().catch(() => undefined);
     queryClient.clear();
     await clearSensitiveData().catch(() => undefined);
-    await disablePushNotifications().catch(() => undefined);
+    // Per-driver UI preference on a shared tablet — clear it so the next driver
+    // gets their own enable-push prompt rather than this driver's dismissal.
+    clearPushBannerDismissal();
   }, [queryClient]);
 
   const loadCurrentUser = useCallback(async () => {
@@ -154,6 +160,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     tokenStore.clear();
     queryClient.clear();
     await clearSensitiveData().catch(() => undefined);
+    // Clear the per-driver push-banner dismissal so the next driver on this
+    // shared tablet is prompted for their own notifications.
+    clearPushBannerDismissal();
     setUser(null);
     setStatus('unauthenticated');
   }, [queryClient]);

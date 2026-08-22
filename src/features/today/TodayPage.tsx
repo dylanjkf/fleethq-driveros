@@ -11,13 +11,12 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { StatusBar } from '@/components/ui/StatusBar';
 import { useAuth } from '@/hooks/useAuth';
 import { LockSettings } from '@/features/lock/LockSettings';
-import { enablePushNotifications, getPushSubscriptionState, isPushSupported } from '@/lib/push-registration';
+import { enablePushNotifications, getPushSubscriptionState, isPushSupported, PUSH_BANNER_DISMISSED_KEY } from '@/lib/push-registration';
 import { directionsUrl } from '@/lib/maps';
 import { useLocationReporter } from '@/hooks/useLocationReporter';
 import { OutboxQuotaError } from '@/lib/offline-db';
 import type { JobStop } from '@/api/types';
 
-const PUSH_DISMISSED_KEY = 'driveros:push-banner-dismissed';
 
 function stopUrl(jobId: string, stop: JobStop): string {
   const params = new URLSearchParams({ jobId, stopId: stop.id, label: stop.label });
@@ -127,7 +126,7 @@ export function TodayPage() {
   const [showPushBanner, setShowPushBanner] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   useEffect(() => {
-    if (!isPushSupported() || localStorage.getItem(PUSH_DISMISSED_KEY) === '1') return;
+    if (!isPushSupported() || localStorage.getItem(PUSH_BANNER_DISMISSED_KEY) === '1') return;
     getPushSubscriptionState().then((state) => setShowPushBanner(state === 'unsubscribed'));
   }, []);
 
@@ -145,7 +144,7 @@ export function TodayPage() {
   }
 
   function dismissPushBanner() {
-    localStorage.setItem(PUSH_DISMISSED_KEY, '1');
+    localStorage.setItem(PUSH_BANNER_DISMISSED_KEY, '1');
     setShowPushBanner(false);
   }
 

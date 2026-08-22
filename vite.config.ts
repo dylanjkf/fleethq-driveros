@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import basicSsl from '@vitejs/plugin-basic-ssl';
+import pkg from './package.json' with { type: 'json' };
 
 // Set HTTPS=true to serve the dev server over a self-signed TLS cert — needed
 // to exercise the PWA / service worker / push on a real device, since those
@@ -12,6 +13,11 @@ import basicSsl from '@vitejs/plugin-basic-ssl';
 const useHttps = process.env.HTTPS === 'true';
 
 export default defineConfig({
+  // The running app version, sent as X-App-Version on every API request so the
+  // server can enforce a minimum-supported build (forced upgrade). Sourced from
+  // package.json at build time; falls back to '0.0.0' under vitest (define is
+  // applied there too, but keep the client's own guard defensive).
+  define: { __APP_VERSION__: JSON.stringify(pkg.version ?? '0.0.0') },
   plugins: [react(), tailwindcss(), ...(useHttps ? [basicSsl()] : [])],
   resolve: {
     alias: {

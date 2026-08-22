@@ -6,19 +6,28 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     var window: UIWindow?
 
+    // Privacy cover shown over the WebView whenever the app leaves the
+    // foreground, so the delivery photo / signature / customer address on screen
+    // never leaks into the iOS app-switcher snapshot. This is the iOS mirror of
+    // Android's FLAG_SECURE (MainActivity.java) — iOS has no true FLAG_SECURE, so
+    // a blur overlay added on resign-active and removed on become-active is the
+    // standard equivalent.
+    private var privacyCover: UIView?
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Override point for customization after application launch.
         return true
     }
 
     func applicationWillResignActive(_ application: UIApplication) {
-        // Sent when the application is about to move from active to inactive state. This can occur for certain types of temporary interruptions (such as an incoming phone call or SMS message) or when the user quits the application and it begins the transition to the background state.
-        // Use this method to pause ongoing tasks, disable timers, and invalidate graphics rendering callbacks. Games should use this method to pause the game.
+        // Cover the screen BEFORE the system captures the app-switcher snapshot
+        // (which happens as the app resigns active).
+        showPrivacyCover()
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
-        // Use this method to release shared resources, save user data, invalidate timers, and store enough application state information to restore your application to its current state in case it is terminated later.
-        // If your application supports background execution, this method is called instead of applicationWillTerminate: when the user quits.
+        // Belt-and-suspenders: ensure the cover is present in the background too.
+        showPrivacyCover()
     }
 
     func applicationWillEnterForeground(_ application: UIApplication) {
@@ -26,7 +35,23 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
-        // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
+        // Back in the foreground for the real user — reveal the WebView.
+        hidePrivacyCover()
+    }
+
+    private func showPrivacyCover() {
+        guard privacyCover == nil, let rootView = window?.rootViewController?.view else { return }
+        let effect = UIBlurEffect(style: .systemMaterial)
+        let cover = UIVisualEffectView(effect: effect)
+        cover.frame = rootView.bounds
+        cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        rootView.addSubview(cover)
+        privacyCover = cover
+    }
+
+    private func hidePrivacyCover() {
+        privacyCover?.removeFromSuperview()
+        privacyCover = nil
     }
 
     func applicationWillTerminate(_ application: UIApplication) {
